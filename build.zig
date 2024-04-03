@@ -21,10 +21,9 @@ pub fn build(b: *std.Build) void {
 
             // NOTE: exe link
             {
-                // NOTE: required to manage X11 windows
-                exe_compile.linkSystemLibrary("xcb");
-                // NOTE: required by xcb
                 exe_compile.linkLibC();
+                exe_compile.linkSystemLibrary("xcb");
+                exe_compile.linkSystemLibrary("vulkan");
             }
 
             // NOTE: exe install
