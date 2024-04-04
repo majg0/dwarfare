@@ -1,4 +1,5 @@
 const std = @import("std");
+const alsa = @import("alsa.zig");
 const xcb = @import("xcb.zig");
 const vk = @import("vulkan.zig");
 
@@ -8,8 +9,11 @@ pub fn main() !void {
     const ui = try xcb.init();
     defer ui.kill();
 
-    const gfx = try vk.init();
-    defer gfx.kill();
+    const gpu = try vk.init();
+    defer gpu.kill();
+
+    const sound = try alsa.init();
+    defer sound.kill();
 
     var should_run = true;
 
