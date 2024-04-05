@@ -4,6 +4,9 @@ const xcb = @import("xcb.zig");
 const vk = @import("vulkan.zig");
 
 pub fn main() !void {
+    // NOTE: this avoids the lack of line break from `zig build run` output
+    std.debug.print("\n", .{});
+
     // TODO: init configuration system first, then choose other systems based on it; e.g. skipping ui on a dedicated server
 
     const ui = try xcb.init();
