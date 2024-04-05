@@ -5,10 +5,14 @@ const c = @cImport({
 
 const VulkanGfx = struct {
     instance: c.VkInstance,
+    arena: std.heap.ArenaAllocator,
 
     pub fn kill(self: VulkanGfx) void {
         c.vkDestroyInstance(self.instance, null);
+        self.arena.deinit();
     }
+
+    pub fn update(_: VulkanGfx) void {}
 };
 
 fn errCheck(result: c.VkResult) !void {
@@ -18,11 +22,10 @@ fn errCheck(result: c.VkResult) !void {
 }
 
 pub fn init() !VulkanGfx {
-    std.debug.print("=== Vulkan ===\n", .{});
+    std.debug.print("\n=== Vulkan ===\n", .{});
 
     // TODO: move this out to a global pre-alloc
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
     const allocator = arena.allocator();
 
     const appInfo = c.VkApplicationInfo{
@@ -93,7 +96,7 @@ pub fn init() !VulkanGfx {
         c.vkGetPhysicalDeviceFeatures(physicalDevice, &physicalDeviceFeatures);
     }
 
-    return VulkanGfx{ .instance = instance };
+    return VulkanGfx{ .instance = instance, .arena = arena };
 }
 
 fn vkPhysicalDeviceTypeName(physicalDeviceType: c.VkPhysicalDeviceType) []const u8 {

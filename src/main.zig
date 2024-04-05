@@ -15,13 +15,12 @@ pub fn main() !void {
     const gpu = try vk.init();
     defer gpu.kill();
 
-    const sound = try alsa.init();
+    var sound = try alsa.init();
     defer sound.kill();
 
     var should_run = true;
 
     while (should_run) {
-        // handle ui
         while (ui.poll()) |event| {
             switch (event) {
                 xcb.UIEvent.Nop => {},
@@ -31,7 +30,9 @@ pub fn main() !void {
             }
         }
 
-        // handle other systems here
+        gpu.update();
+
+        try sound.update();
     }
 
     std.debug.print("exit clean\n", .{});
