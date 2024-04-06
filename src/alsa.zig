@@ -41,8 +41,9 @@ const ALSAAudio = struct {
                 for (0..self.frame_size) |sample_index| {
                     const phase_root = @as(f64, @floatFromInt((self.samples_tot + sample_index) % self.sample_rate)) / @as(f64, @floatFromInt(self.sample_rate));
 
-                    const vol = 1000;
-                    const amp = wavetable_read(wavetable_sine, 440 * phase_root) + wavetable_read(wavetable_sine, 660 * phase_root);
+                    // TODO: make usable later; for now this is a quick way to disable sound
+                    const vol = 0;
+                    const amp = wavetable_read(wavetable_sine, 440 * phase_root);
                     for (0..self.channel_count) |channel_index| {
                         const i = sample_index * self.channel_count + channel_index;
                         self.audio_data[i] = @intFromFloat(vol * amp);
