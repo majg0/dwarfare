@@ -9,7 +9,7 @@ pub fn main() !void {
 
     // TODO: init configuration system first, then choose other systems based on it; e.g. skipping ui on a dedicated server
 
-    const ui = try xcb.init();
+    var ui = try xcb.init();
     defer ui.kill();
 
     const gpu = try vk.init();
@@ -24,11 +24,23 @@ pub fn main() !void {
         while (ui.poll()) |event| {
             switch (event) {
                 xcb.UIEvent.Nop => {},
+                xcb.UIEvent.KeysChanged => {},
                 xcb.UIEvent.Exit => {
                     should_run = false;
                 },
             }
         }
+
+        if (ui.keys.pressed(1)) {
+            std.debug.print("LMB!\n", .{});
+        }
+        if (ui.keys.pressed(9)) {
+            std.debug.print("Esc!\n", .{});
+            should_run = false;
+            break;
+        }
+
+        ui.update();
 
         gpu.update();
 
