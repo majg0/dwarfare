@@ -18,6 +18,8 @@ pub fn main() !void {
     var sound = try alsa.init();
     defer sound.kill();
 
+    sound.master_volume = 0;
+
     var should_run = true;
 
     while (should_run) {
