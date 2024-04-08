@@ -26,7 +26,6 @@ pub fn main() !void {
         while (ui.poll()) |event| {
             switch (event) {
                 xcb.UIEvent.Nop => {},
-                xcb.UIEvent.KeysChanged => {},
                 xcb.UIEvent.Exit => {
                     should_run = false;
                 },

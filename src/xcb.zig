@@ -6,7 +6,7 @@ const c = @cImport({
 
 // DOCS: https://www.x.org/releases/X11R7.5/doc/x11proto/proto.pdf
 
-pub const UIEvent = enum { Nop, KeysChanged, Exit };
+pub const UIEvent = enum { Nop, Exit };
 
 pub const Keys = struct {
     state: [32]u8,
@@ -64,25 +64,21 @@ const XCBUI = struct {
                 const e: *c.xcb_key_press_event_t = @ptrCast(generic_event);
                 std.debug.print("0x{X} KeyPress {} (0b{b}) ({},{}) root:({},{})\n", .{ e.event, e.detail, e.state, e.event_x, e.event_y, e.root_x, e.root_y });
                 self.keys.set(e.detail);
-                return UIEvent.KeysChanged;
             },
             c.XCB_KEY_RELEASE => {
                 const e: *c.xcb_key_release_event_t = @ptrCast(generic_event);
                 std.debug.print("0x{X} KeyRelease {} (0b{b}) ({},{}) root:({},{})\n", .{ e.event, e.detail, e.state, e.event_x, e.event_y, e.root_x, e.root_y });
                 self.keys.unset(e.detail);
-                return UIEvent.KeysChanged;
             },
             c.XCB_BUTTON_PRESS => {
                 const e: *c.xcb_button_press_event_t = @ptrCast(generic_event);
                 std.debug.print("0x{X} ButtonPress {} (0b{b}) ({},{}) root:({},{})\n", .{ e.event, e.detail, e.state, e.event_x, e.event_y, e.root_x, e.root_y });
                 self.keys.set(e.detail);
-                return UIEvent.KeysChanged;
             },
             c.XCB_BUTTON_RELEASE => {
                 const e: *c.xcb_button_release_event_t = @ptrCast(generic_event);
                 std.debug.print("0x{X} ButtonRelease {} (0b{b}) ({},{}) root:({},{})\n", .{ e.event, e.detail, e.state, e.event_x, e.event_y, e.root_x, e.root_y });
                 self.keys.unset(e.detail);
-                return UIEvent.KeysChanged;
             },
             c.XCB_MOTION_NOTIFY => {
                 const e: *c.xcb_motion_notify_event_t = @ptrCast(generic_event);
