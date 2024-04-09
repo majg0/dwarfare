@@ -51,7 +51,7 @@ const ALSAAudio = struct {
 
                         switch (self.format) {
                             c.SND_PCM_FORMAT_FLOAT64_LE => {
-                                std.mem.bytesAsSlice(f64, self.audio_data)[i] = @floatCast(vol * amp);
+                                std.mem.bytesAsSlice(f64, self.audio_data)[i] = vol * amp;
                             },
                             c.SND_PCM_FORMAT_FLOAT_LE => {
                                 std.mem.bytesAsSlice(f32, self.audio_data)[i] = @floatCast(vol * amp);
@@ -152,7 +152,7 @@ pub fn init() !ALSAAudio {
 
     var sample_rate: u32 = 44100; // CD quality audio; 2*2*3*3*5*5*7*7
     const batches_per_second = 525; // = 3*5*5*7
-    var frame_size: c.snd_pcm_uframes_t = 44100 / batches_per_second;
+    var frame_size: c.snd_pcm_uframes_t = sample_rate / batches_per_second;
     var period_size: c.snd_pcm_uframes_t = 0;
     var buffer_size: u32 = 0;
     var channel_count: u32 = 2;
@@ -193,6 +193,7 @@ pub fn init() !ALSAAudio {
             for (format_priorities) |candidate| {
                 if (c.snd_pcm_format_mask_test(format_mask, candidate) == std.math.shl(u32, 1, candidate)) {
                     format = candidate;
+                    break;
                 }
             }
         }
@@ -209,7 +210,7 @@ pub fn init() !ALSAAudio {
         format_width = @intCast(c.snd_pcm_format_width(format));
         buffer_size = @as(u32, @intCast(period_size)) * (format_width >> 3);
 
-        std.debug.print("Format: {s}{}\n", .{ if (c.snd_pcm_format_float(format) != 0) "f" else if (c.snd_pcm_format_unsigned(format) != 0) "u" else "i", format_width });
+        std.debug.print("Format: {s}{} {s}e\n", .{ if (c.snd_pcm_format_float(format) != 0) "f" else if (c.snd_pcm_format_unsigned(format) != 0) "u" else "i", format_width, if (c.snd_pcm_format_little_endian(format) != 0) "l" else "b" });
         std.debug.print("Sample rate {}\n", .{sample_rate});
         std.debug.print("Frame size: {}\n", .{frame_size});
         std.debug.print("Period size: {}\n", .{period_size});
