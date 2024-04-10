@@ -27,7 +27,7 @@ const ALSAAudio = struct {
                 return error.ALSAXRun;
             } else try errCheck(@truncate(avail));
 
-            const samples_written = c.snd_pcm_writei(self.pcm_handle, self.audio_data.ptr, self.audio_data.len);
+            const samples_written = c.snd_pcm_writei(self.pcm_handle, self.audio_data.ptr, self.frame_size);
             if (samples_written == -c.EAGAIN) {
                 // The PCM device is not ready for more data, skip this cycle.
                 // TODO: we could yield null here to break a loop
@@ -37,17 +37,21 @@ const ALSAAudio = struct {
             if (samples_written < 0) {
                 try errCheck(c.snd_pcm_recover(self.pcm_handle, @truncate(samples_written), 0));
             } else {
+                std.debug.assert(samples_written == self.frame_size);
+
                 // TODO: we could yield to consumer here for handling the frame
                 self.samples_tot += @intCast(samples_written);
 
                 // interleaved write
-                for (0..self.frame_size) |sample_index| {
-                    const phase_root = @as(f64, @floatFromInt((self.samples_tot + sample_index) % self.sample_rate)) / @as(f64, @floatFromInt(self.sample_rate));
+                for (0..self.frame_size) |sample_local| {
+                    const sample_global = self.samples_tot + sample_local;
+                    const step = 1.0 / @as(f64, @floatFromInt(self.sample_rate));
+                    const phase_root = @as(f64, @floatFromInt(sample_global % self.sample_rate)) * step;
 
                     const vol = 0.5 * self.master_volume;
                     const amp = wavetable_read(wavetable_sine, 440 * phase_root);
                     for (0..self.channel_count) |channel_index| {
-                        const i = sample_index * self.channel_count + channel_index;
+                        const i = sample_local * self.channel_count + channel_index;
 
                         switch (self.format) {
                             c.SND_PCM_FORMAT_FLOAT64_LE => {
@@ -131,7 +135,7 @@ pub fn init() !ALSAAudio {
 
             try errCheck(c.snd_ctl_card_info(ctl, ctl_card_info));
             const card_name = std.mem.span(c.snd_ctl_card_info_get_name(ctl_card_info));
-            std.debug.print("Sound Card Name: {s}\n", .{card_name});
+            std.debug.print("\nSound Card Name: {s}\n", .{card_name});
         }
 
         var device_i: c_int = -1;
@@ -151,17 +155,25 @@ pub fn init() !ALSAAudio {
     const pcm_name = "default";
 
     var sample_rate: u32 = 44100; // CD quality audio; 2*2*3*3*5*5*7*7
-    const batches_per_second = 525; // = 3*5*5*7
-    var frame_size: c.snd_pcm_uframes_t = sample_rate / batches_per_second;
+    const frames_per_second = 525; // = 3*5*5*7
+    var frame_size: c.snd_pcm_uframes_t = sample_rate / frames_per_second;
     var period_size: c.snd_pcm_uframes_t = 0;
     var buffer_size: u32 = 0;
     var channel_count: u32 = 2;
     var format: i32 = 0;
     var format_width: u32 = 0;
+    const subformat: i32 = c.SND_PCM_SUBFORMAT_STD;
 
-    // open/close
+    // pcm
     var pcm_handle: ?*c.snd_pcm_t = null;
     try errCheck(c.snd_pcm_open(&pcm_handle, pcm_name, c.SND_PCM_STREAM_PLAYBACK, c.SND_PCM_NONBLOCK));
+
+    std.debug.print("\nPCM:\n", .{});
+    // TODO: double check we don't need to free any strings
+    const pcm_type = c.snd_pcm_type(pcm_handle);
+    std.debug.print("- type: {s}\n", .{c.snd_pcm_type_name(pcm_type)});
+    const stream = c.snd_pcm_stream(pcm_handle);
+    std.debug.print("- stream name: {s}\n", .{c.snd_pcm_stream_name(stream)});
 
     // configure hw
     {
@@ -199,6 +211,7 @@ pub fn init() !ALSAAudio {
         }
 
         try errCheck(c.snd_pcm_hw_params_set_format(pcm_handle, hw_params, format));
+        try errCheck(c.snd_pcm_hw_params_set_subformat(pcm_handle, hw_params, subformat));
         try errCheck(c.snd_pcm_hw_params_set_rate_near(pcm_handle, hw_params, &sample_rate, 0));
         try errCheck(c.snd_pcm_hw_params_set_period_size_near(pcm_handle, hw_params, &frame_size, 0));
         try errCheck(c.snd_pcm_hw_params_set_channels_near(pcm_handle, hw_params, &channel_count));
@@ -207,21 +220,26 @@ pub fn init() !ALSAAudio {
         try errCheck(c.snd_pcm_hw_params_set_buffer_size_near(pcm_handle, hw_params, &period_size));
         try errCheck(c.snd_pcm_hw_params(pcm_handle, hw_params));
 
-        format_width = @intCast(c.snd_pcm_format_width(format));
+        format_width = @intCast(c.snd_pcm_format_physical_width(format));
         buffer_size = @as(u32, @intCast(period_size)) * (format_width >> 3);
 
-        std.debug.print("Format: {s}{} {s}e\n", .{ if (c.snd_pcm_format_float(format) != 0) "f" else if (c.snd_pcm_format_unsigned(format) != 0) "u" else "i", format_width, if (c.snd_pcm_format_little_endian(format) != 0) "l" else "b" });
-        std.debug.print("Sample rate {}\n", .{sample_rate});
-        std.debug.print("Frame size: {}\n", .{frame_size});
-        std.debug.print("Period size: {}\n", .{period_size});
-        std.debug.print("Buffer size: {}\n", .{buffer_size});
-        std.debug.print("Channel count: {}\n", .{channel_count});
-        std.debug.print("Batches per second: {}\n", .{sample_rate / frame_size});
+        std.debug.print("\nHardware params:\n", .{});
+        std.debug.print("- sample rate: {}\n", .{sample_rate});
+        std.debug.print("- frame size: {}B\n", .{frame_size});
+        std.debug.print("- period size: {}B\n", .{period_size});
+        std.debug.print("- buffer size: {}B\n", .{buffer_size});
+        std.debug.print("- channel count: {}\n", .{channel_count});
+
+        std.debug.print("- access: {s}\n", .{c.snd_pcm_access_name(c.SND_PCM_ACCESS_RW_INTERLEAVED)});
+        std.debug.print("- format: {s} ({s})\n", .{ c.snd_pcm_format_name(format), c.snd_pcm_format_description(format) });
+        std.debug.print("- subformat: {s} ({s})\n", .{ c.snd_pcm_subformat_name(subformat), c.snd_pcm_subformat_description(subformat) });
     }
 
-    const audio_data = try allocator.alignedAlloc(u8, 64, buffer_size);
+    const audio_data = try allocator.alignedAlloc(u8, 8, buffer_size);
+
+    // TODO: does not seem to work, needs more investigation
     // avoid initial "click"
-    try errCheck(c.snd_pcm_format_set_silence(format, audio_data.ptr, @truncate(period_size)));
+    try errCheck(c.snd_pcm_format_set_silence(format, audio_data.ptr, @truncate(frame_size)));
 
     for (&wavetable_sine, 0..wavetable_len) |*sample, index| {
         const phase: f64 = @as(f64, @floatFromInt(index)) / @as(f64, @floatFromInt(wavetable_len));

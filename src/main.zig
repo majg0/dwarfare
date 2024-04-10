@@ -2,6 +2,7 @@ const std = @import("std");
 const alsa = @import("alsa.zig");
 const xcb = @import("xcb.zig");
 const vk = @import("vulkan.zig");
+const inp = @import("input.zig");
 
 const Action = enum(u8) {
     exit,
@@ -9,7 +10,7 @@ const Action = enum(u8) {
 
 const Bindings = struct {
     main: struct {
-        exit: xcb.Binding,
+        exit: inp.Binding,
     },
 };
 
@@ -19,7 +20,7 @@ pub fn main() !void {
 
     // TODO: init configuration system first, then choose other systems based on it; e.g. skipping ui on a dedicated server
 
-    const input = blk: {
+    const bindings = blk: {
         if (std.fs.cwd().openFileZ("input.dat", .{})) |file| {
             defer file.close();
             var binding: Bindings = undefined;
@@ -62,14 +63,18 @@ pub fn main() !void {
     var sound = try alsa.init();
     defer sound.kill();
 
-    sound.master_volume = 0;
+    sound.master_volume = 0.01;
 
     var should_run = true;
 
-    while (should_run) {
-        ui.update();
+    var input = inp.Input{};
 
-        if (input.main.exit.check(ui)) {
+    std.debug.print("\n=== Start ===\n", .{});
+
+    while (should_run) {
+        ui.consume_events(&input);
+
+        if (bindings.main.exit.check(input)) {
             should_run = false;
             break;
         }
@@ -79,5 +84,5 @@ pub fn main() !void {
         try sound.update();
     }
 
-    std.debug.print("exit clean\n", .{});
+    std.debug.print("exited cleanly\n", .{});
 }

@@ -41,7 +41,7 @@ pub fn init() !VulkanGfx {
     {
         var extensionCount: u32 = 0;
         try errCheck(c.vkEnumerateInstanceExtensionProperties(null, &extensionCount, null));
-        std.debug.print("Available Instance Extensions ({}):\n", .{extensionCount});
+        std.debug.print("\nAvailable Instance Extensions ({}):\n", .{extensionCount});
 
         const extensions = try allocator.alloc(c.VkExtensionProperties, extensionCount);
         try errCheck(c.vkEnumerateInstanceExtensionProperties(null, &extensionCount, extensions.ptr));
@@ -55,7 +55,7 @@ pub fn init() !VulkanGfx {
     {
         var layerCount: u32 = 0;
         try errCheck(c.vkEnumerateInstanceLayerProperties(&layerCount, null));
-        std.debug.print("Available Instance Layers ({}):\n", .{layerCount});
+        std.debug.print("\nAvailable Instance Layers ({}):\n", .{layerCount});
 
         const layers = try allocator.alloc(c.VkLayerProperties, layerCount);
         try errCheck(c.vkEnumerateInstanceLayerProperties(&layerCount, layers.ptr));
@@ -85,7 +85,7 @@ pub fn init() !VulkanGfx {
     const physicalDevices = try allocator.alloc(c.VkPhysicalDevice, physicalDeviceCount);
     try errCheck(c.vkEnumeratePhysicalDevices(instance, &physicalDeviceCount, physicalDevices.ptr));
 
-    std.debug.print("Available Physical Devices ({})\n", .{physicalDeviceCount});
+    std.debug.print("\nAvailable Physical Devices ({})\n", .{physicalDeviceCount});
     for (physicalDevices) |physicalDevice| {
         var physicalDeviceProperties: c.VkPhysicalDeviceProperties = undefined;
         c.vkGetPhysicalDeviceProperties(physicalDevice, &physicalDeviceProperties);
