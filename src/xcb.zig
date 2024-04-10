@@ -6,141 +6,205 @@ const c = @cImport({
 
 // DOCS: https://www.x.org/releases/X11R7.5/doc/x11proto/proto.pdf
 
-pub const UIEvent = enum { Nop, Exit };
+const Bindable = union(enum) {
+    const Physical = struct {
+        event: enum(u8) {
+            down,
+            up,
+            press,
+            release,
+        },
+        key: enum(u8) {
+            button1 = 1,
+            button2 = 2,
+            button3 = 3,
+            button4 = 4,
+            button5 = 5,
+            esc = 9,
+        },
 
-pub const Keys = struct {
-    state: [32]u8,
-    prev: [32]u8,
+        fn check(self: Physical, keys: XcbUi.Keys) bool {
+            const index = @intFromEnum(self.key);
+            return switch (self.event) {
+                .down => keys.down(index),
+                .up => keys.up(index),
+                .press => keys.pressed(index),
+                .release => keys.released(index),
+            };
+        }
+    };
 
-    pub fn set(self: *Keys, index: u8) void {
-        self.state[index >> 3] |= std.math.shl(u8, 1, index & 7);
-    }
+    const Wm = struct {
+        event: XcbUi.Wm.Event,
 
-    pub fn unset(self: *Keys, index: u8) void {
-        self.state[index >> 3] &= ~std.math.shl(u8, 1, index & 7);
-    }
+        fn check(self: Wm, wm: XcbUi.Wm) bool {
+            return (wm.flags & @intFromEnum(self.event)) != 0;
+        }
+    };
 
-    pub fn down(self: *Keys, index: u8) bool {
-        return (self.state[index >> 3] & std.math.shl(u8, 1, index & 7)) != 0;
-    }
+    physical: Physical,
+    wm: Wm,
+    none: struct {},
 
-    pub fn up(self: *Keys, index: u8) bool {
-        return (self.state[index >> 3] & std.math.shl(u8, 1, index & 7)) == 0;
-    }
-
-    pub fn pressed(self: *Keys, index: u8) bool {
-        return (self.prev[index >> 3] & std.math.shl(u8, 1, index & 7)) == 0 and self.down(index);
-    }
-
-    pub fn released(self: *Keys, index: u8) bool {
-        return (self.prev[index >> 3] & std.math.shl(u8, 1, index & 7)) != 0 and self.up(index);
-    }
-
-    pub fn nextFrame(self: *Keys) void {
-        std.mem.copyForwards(u8, &self.prev, &self.state);
+    fn check(self: Bindable, ui: XcbUi) bool {
+        return switch (self) {
+            .physical => |e| e.check(ui.keys),
+            .wm => |e| e.check(ui.wm),
+            .none => false,
+        };
     }
 };
 
-const XCBUI = struct {
+pub const Binding = struct {
+    main: Bindable,
+    alt: Bindable,
+
+    pub fn check(self: @This(), ui: XcbUi) bool {
+        return self.main.check(ui) or self.alt.check(ui);
+    }
+};
+
+const XcbUi = struct {
+    const Wm = struct {
+        const Event = enum(u8) {
+            delete_window = 0b01,
+        };
+
+        flags: u8,
+    };
+
+    pub const Keys = struct {
+        state: [32]u8 = [_]u8{0} ** 32,
+        prev: [32]u8 = [_]u8{0} ** 32,
+
+        fn set(self: *Keys, index: u8) void {
+            self.state[index >> 3] |= std.math.shl(u8, 1, index & 7);
+        }
+
+        fn unset(self: *Keys, index: u8) void {
+            self.state[index >> 3] &= ~std.math.shl(u8, 1, index & 7);
+        }
+
+        pub fn down(self: Keys, index: u8) bool {
+            return (self.state[index >> 3] & std.math.shl(u8, 1, index & 7)) != 0;
+        }
+
+        pub fn up(self: Keys, index: u8) bool {
+            return (self.state[index >> 3] & std.math.shl(u8, 1, index & 7)) == 0;
+        }
+
+        pub fn pressed(self: Keys, index: u8) bool {
+            return (self.prev[index >> 3] & std.math.shl(u8, 1, index & 7)) == 0 and self.down(index);
+        }
+
+        pub fn released(self: Keys, index: u8) bool {
+            return (self.prev[index >> 3] & std.math.shl(u8, 1, index & 7)) != 0 and self.up(index);
+        }
+
+        fn nextFrame(self: *Keys) void {
+            std.mem.copyForwards(u8, &self.prev, &self.state);
+        }
+    };
+
     connection: *c.struct_xcb_connection_t,
     wm_delete_window_atom: u32,
     keys: Keys,
+    wm: Wm,
 
-    pub fn update(self: *XCBUI) void {
+    pub fn update(self: *XcbUi) void {
         self.keys.nextFrame();
-    }
+        self.wm.flags = 0;
 
-    pub fn poll(self: *XCBUI) ?UIEvent {
-        const generic_event: *c.xcb_generic_event_t = c.xcb_poll_for_event(self.connection) orelse return null;
-        defer c.free(generic_event);
+        for (0..100) |_| {
+            const generic_event: *c.xcb_generic_event_t = c.xcb_poll_for_event(self.connection) orelse return;
+            defer c.free(generic_event);
 
-        const response_type = generic_event.response_type & 0x7F;
-        switch (response_type) {
-            c.XCB_NONE => {
-                const e: *c.xcb_generic_error_t = @ptrCast(generic_event);
-                std.debug.print("XCB error code {}", .{e.error_code});
-            },
-            c.XCB_KEY_PRESS => {
-                const e: *c.xcb_key_press_event_t = @ptrCast(generic_event);
-                std.debug.print("0x{X} KeyPress {} (0b{b}) ({},{}) root:({},{})\n", .{ e.event, e.detail, e.state, e.event_x, e.event_y, e.root_x, e.root_y });
-                self.keys.set(e.detail);
-            },
-            c.XCB_KEY_RELEASE => {
-                const e: *c.xcb_key_release_event_t = @ptrCast(generic_event);
-                std.debug.print("0x{X} KeyRelease {} (0b{b}) ({},{}) root:({},{})\n", .{ e.event, e.detail, e.state, e.event_x, e.event_y, e.root_x, e.root_y });
-                self.keys.unset(e.detail);
-            },
-            c.XCB_BUTTON_PRESS => {
-                const e: *c.xcb_button_press_event_t = @ptrCast(generic_event);
-                std.debug.print("0x{X} ButtonPress {} (0b{b}) ({},{}) root:({},{})\n", .{ e.event, e.detail, e.state, e.event_x, e.event_y, e.root_x, e.root_y });
-                self.keys.set(e.detail);
-            },
-            c.XCB_BUTTON_RELEASE => {
-                const e: *c.xcb_button_release_event_t = @ptrCast(generic_event);
-                std.debug.print("0x{X} ButtonRelease {} (0b{b}) ({},{}) root:({},{})\n", .{ e.event, e.detail, e.state, e.event_x, e.event_y, e.root_x, e.root_y });
-                self.keys.unset(e.detail);
-            },
-            c.XCB_MOTION_NOTIFY => {
-                const e: *c.xcb_motion_notify_event_t = @ptrCast(generic_event);
-                std.debug.print("0x{X} MotionNotify (0b{b}) ({},{}) root:({},{})\n", .{ e.event, e.state, e.event_x, e.event_y, e.root_x, e.root_y });
-            },
-            c.XCB_ENTER_NOTIFY => {
-                const e: *c.xcb_enter_notify_event_t = @ptrCast(generic_event);
-                std.debug.print("0x{X} EnterNotify ({},{}) root:({},{})\n", .{ e.event, e.event_x, e.event_y, e.root_x, e.root_y });
-            },
-            c.XCB_LEAVE_NOTIFY => {
-                const e: *c.xcb_leave_notify_event_t = @ptrCast(generic_event);
-                std.debug.print("0x{X} LeaveNotify ({},{}) root:({},{})\n", .{ e.event, e.event_x, e.event_y, e.root_x, e.root_y });
-            },
-            c.XCB_FOCUS_IN => {
-                const e: *c.xcb_focus_in_event_t = @ptrCast(generic_event);
-                std.debug.print("0x{X} FocusIn\n", .{e.event});
-            },
-            c.XCB_FOCUS_OUT => {
-                const e: *c.xcb_focus_out_event_t = @ptrCast(generic_event);
-                std.debug.print("0x{X} FocusOut\n", .{e.event});
-            },
-            c.XCB_EXPOSE => {
-                const e: *c.xcb_expose_event_t = @ptrCast(generic_event);
-                std.debug.print("0x{X} Expose ({},{},{},{})\n", .{ e.window, e.x, e.y, e.width, e.height });
-            },
-            // pub const XCB_VISIBILITY_NOTIFY = @as(c_int, 15);
-            // pub const XCB_MAP_NOTIFY = @as(c_int, 19);
-            // pub const XCB_REPARENT_NOTIFY = @as(c_int, 21);
-            // pub const XCB_CONFIGURE_NOTIFY = @as(c_int, 22);
-            // pub const XCB_PROPERTY_NOTIFY = @as(c_int, 28);
-            c.XCB_MAPPING_NOTIFY => {
-                const e: *c.xcb_mapping_notify_event_t = @ptrCast(generic_event);
-                // pub const XCB_MAPPING_MODIFIER: c_int = 0;
-                // pub const XCB_MAPPING_KEYBOARD: c_int = 1;
-                // pub const XCB_MAPPING_POINTER: c_int = 2;
-                std.debug.print("MappingNotify {} {} {}\n", .{ e.request, e.first_keycode, e.count });
-            },
-            c.XCB_CLIENT_MESSAGE => {
-                const e: *const c.xcb_client_message_event_t = @ptrCast(generic_event);
-                switch (e.format) {
-                    8 => {},
-                    16 => {},
-                    32 => if (e.data.data32[0] == self.wm_delete_window_atom) {
-                        return UIEvent.Exit;
-                    },
-                    else => {},
-                }
-            },
-            else => {
-                std.debug.print("unhandled event {}\n", .{generic_event.response_type});
-            },
+            const response_type = generic_event.response_type & 0x7F;
+            switch (response_type) {
+                c.XCB_NONE => {
+                    const e: *c.xcb_generic_error_t = @ptrCast(generic_event);
+                    std.debug.print("XCB error code {}", .{e.error_code});
+                },
+                c.XCB_KEY_PRESS => {
+                    const e: *c.xcb_key_press_event_t = @ptrCast(generic_event);
+                    std.debug.print("0x{X} KeyPress {} (0b{b}) ({},{}) root:({},{})\n", .{ e.event, e.detail, e.state, e.event_x, e.event_y, e.root_x, e.root_y });
+                    self.keys.set(e.detail);
+                },
+                c.XCB_KEY_RELEASE => {
+                    const e: *c.xcb_key_release_event_t = @ptrCast(generic_event);
+                    std.debug.print("0x{X} KeyRelease {} (0b{b}) ({},{}) root:({},{})\n", .{ e.event, e.detail, e.state, e.event_x, e.event_y, e.root_x, e.root_y });
+                    self.keys.unset(e.detail);
+                },
+                c.XCB_BUTTON_PRESS => {
+                    const e: *c.xcb_button_press_event_t = @ptrCast(generic_event);
+                    std.debug.print("0x{X} ButtonPress {} (0b{b}) ({},{}) root:({},{})\n", .{ e.event, e.detail, e.state, e.event_x, e.event_y, e.root_x, e.root_y });
+                    self.keys.set(e.detail);
+                },
+                c.XCB_BUTTON_RELEASE => {
+                    const e: *c.xcb_button_release_event_t = @ptrCast(generic_event);
+                    std.debug.print("0x{X} ButtonRelease {} (0b{b}) ({},{}) root:({},{})\n", .{ e.event, e.detail, e.state, e.event_x, e.event_y, e.root_x, e.root_y });
+                    self.keys.unset(e.detail);
+                },
+                c.XCB_MOTION_NOTIFY => {
+                    const e: *c.xcb_motion_notify_event_t = @ptrCast(generic_event);
+                    std.debug.print("0x{X} MotionNotify (0b{b}) ({},{}) root:({},{})\n", .{ e.event, e.state, e.event_x, e.event_y, e.root_x, e.root_y });
+                },
+                c.XCB_ENTER_NOTIFY => {
+                    const e: *c.xcb_enter_notify_event_t = @ptrCast(generic_event);
+                    std.debug.print("0x{X} EnterNotify ({},{}) root:({},{})\n", .{ e.event, e.event_x, e.event_y, e.root_x, e.root_y });
+                },
+                c.XCB_LEAVE_NOTIFY => {
+                    const e: *c.xcb_leave_notify_event_t = @ptrCast(generic_event);
+                    std.debug.print("0x{X} LeaveNotify ({},{}) root:({},{})\n", .{ e.event, e.event_x, e.event_y, e.root_x, e.root_y });
+                },
+                c.XCB_FOCUS_IN => {
+                    const e: *c.xcb_focus_in_event_t = @ptrCast(generic_event);
+                    std.debug.print("0x{X} FocusIn\n", .{e.event});
+                },
+                c.XCB_FOCUS_OUT => {
+                    const e: *c.xcb_focus_out_event_t = @ptrCast(generic_event);
+                    std.debug.print("0x{X} FocusOut\n", .{e.event});
+                },
+                c.XCB_EXPOSE => {
+                    const e: *c.xcb_expose_event_t = @ptrCast(generic_event);
+                    std.debug.print("0x{X} Expose ({},{},{},{})\n", .{ e.window, e.x, e.y, e.width, e.height });
+                },
+                // pub const XCB_VISIBILITY_NOTIFY = @as(c_int, 15);
+                // pub const XCB_MAP_NOTIFY = @as(c_int, 19);
+                // pub const XCB_REPARENT_NOTIFY = @as(c_int, 21);
+                // pub const XCB_CONFIGURE_NOTIFY = @as(c_int, 22);
+                // pub const XCB_PROPERTY_NOTIFY = @as(c_int, 28);
+                c.XCB_MAPPING_NOTIFY => {
+                    const e: *c.xcb_mapping_notify_event_t = @ptrCast(generic_event);
+                    // pub const XCB_MAPPING_MODIFIER: c_int = 0;
+                    // pub const XCB_MAPPING_KEYBOARD: c_int = 1;
+                    // pub const XCB_MAPPING_POINTER: c_int = 2;
+                    std.debug.print("MappingNotify {} {} {}\n", .{ e.request, e.first_keycode, e.count });
+                },
+                c.XCB_CLIENT_MESSAGE => {
+                    const e: *const c.xcb_client_message_event_t = @ptrCast(generic_event);
+                    switch (e.format) {
+                        8 => {},
+                        16 => {},
+                        32 => if (e.data.data32[0] == self.wm_delete_window_atom) {
+                            self.wm.flags |= @intFromEnum(Wm.Event.delete_window);
+                        },
+                        else => {},
+                    }
+                },
+                else => {
+                    std.debug.print("unhandled event {}\n", .{generic_event.response_type});
+                },
+            }
         }
-
-        return UIEvent.Nop;
     }
 
-    pub fn kill(self: XCBUI) void {
+    pub fn kill(self: XcbUi) void {
         c.xcb_disconnect(self.connection);
     }
 };
 
-pub fn init() !XCBUI {
+pub fn init() !XcbUi {
     std.debug.print("\n=== XCB ===\n", .{});
 
     const connection: *c.struct_xcb_connection_t = c.xcb_connect(null, null) orelse {
@@ -203,7 +267,12 @@ pub fn init() !XCBUI {
 
     _ = c.xcb_flush(connection);
 
-    return XCBUI{ .connection = connection, .wm_delete_window_atom = wm_delete_window_atom, .keys = Keys{ .state = [_]u8{0} ** 32, .prev = [_]u8{0} ** 32 } };
+    return XcbUi{
+        .connection = connection,
+        .wm_delete_window_atom = wm_delete_window_atom,
+        .keys = .{},
+        .wm = .{ .flags = 0 },
+    };
 }
 
 fn intern_atom_reply(connection: *c.xcb_connection_t, cookie: c.xcb_intern_atom_cookie_t) !c.xcb_atom_t {
