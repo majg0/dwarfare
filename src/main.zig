@@ -63,7 +63,7 @@ pub fn main() !void {
     var sound = try alsa.init();
     defer sound.kill();
 
-    sound.master_volume = 0.5;
+    sound.master_volume = 0.05;
 
     var should_run = true;
 

@@ -3,7 +3,7 @@ const c = @cImport({
     @cInclude("alsa/asoundlib.h");
 });
 
-const ALSAAudio = struct {
+const AlsaAudio = struct {
     audio_data: []u8,
     pcm_handle: ?*c.snd_pcm_t,
     samples_tot: usize,
@@ -15,17 +15,17 @@ const ALSAAudio = struct {
     format_width: u32,
     master_volume: f64,
 
-    pub fn kill(self: *ALSAAudio) void {
+    pub fn kill(self: *AlsaAudio) void {
         self.arena.deinit();
-        errCheck(c.snd_pcm_close(self.pcm_handle)) catch {};
+        err_check(c.snd_pcm_close(self.pcm_handle)) catch {};
     }
-    pub fn update(self: *ALSAAudio) !void {
+    pub fn update(self: *AlsaAudio) !void {
         while (true) {
             const avail = c.snd_pcm_avail_update(self.pcm_handle);
             if (avail == -c.EPIPE) {
                 // NOTE: XRun means buffer underrun or overrun
-                return error.ALSAXRun;
-            } else try errCheck(@truncate(avail));
+                return error.AlsaXRun;
+            } else try err_check(@truncate(avail));
 
             const samples_written = c.snd_pcm_writei(self.pcm_handle, self.audio_data.ptr, self.frame_size);
             if (samples_written == -c.EAGAIN) {
@@ -35,7 +35,7 @@ const ALSAAudio = struct {
             }
 
             if (samples_written < 0) {
-                try errCheck(c.snd_pcm_recover(self.pcm_handle, @truncate(samples_written), 0));
+                try err_check(c.snd_pcm_recover(self.pcm_handle, @truncate(samples_written), 0));
             } else {
                 std.debug.assert(samples_written == self.frame_size);
 
@@ -86,7 +86,7 @@ const ALSAAudio = struct {
                             },
                             else => {
                                 std.debug.print("missing format implementation {}", .{self.format});
-                                return error.ALSAUnsupportedFormat;
+                                return error.AlsaUnsupportedFormat;
                             },
                         }
                     }
@@ -96,15 +96,15 @@ const ALSAAudio = struct {
     }
 };
 
-fn errCheck(result: c_int) !void {
+fn err_check(result: c_int) !void {
     if (result < 0) {
         const msg = std.mem.span(c.snd_strerror(result));
         std.debug.print("ALSA Error: {s}\n", .{msg});
-        return error.ALSAError;
+        return error.AlsaError;
     }
 }
 
-pub fn init() !ALSAAudio {
+pub fn init() !AlsaAudio {
     std.debug.print("\n=== ALSA ===\n", .{});
 
     // TODO: move this out to a global pre-alloc
@@ -115,7 +115,7 @@ pub fn init() !ALSAAudio {
 
     // enumerate devices
     while (true) {
-        try errCheck(c.snd_card_next(&card_i));
+        try err_check(c.snd_card_next(&card_i));
 
         if (card_i == -1)
             break;
@@ -125,22 +125,22 @@ pub fn init() !ALSAAudio {
 
         var ctl: ?*c.snd_ctl_t = null;
 
-        try errCheck(c.snd_ctl_open(&ctl, card_s.ptr, 0));
-        defer errCheck(c.snd_ctl_close(ctl)) catch {};
+        try err_check(c.snd_ctl_open(&ctl, card_s.ptr, 0));
+        defer err_check(c.snd_ctl_close(ctl)) catch {};
 
         {
             var ctl_card_info: ?*c.snd_ctl_card_info_t = null;
-            try errCheck(c.snd_ctl_card_info_malloc(&ctl_card_info));
+            try err_check(c.snd_ctl_card_info_malloc(&ctl_card_info));
             defer c.snd_ctl_card_info_free(ctl_card_info);
 
-            try errCheck(c.snd_ctl_card_info(ctl, ctl_card_info));
+            try err_check(c.snd_ctl_card_info(ctl, ctl_card_info));
             const card_name = std.mem.span(c.snd_ctl_card_info_get_name(ctl_card_info));
             std.debug.print("\nSound Card Name: {s}\n", .{card_name});
         }
 
         var device_i: c_int = -1;
         while (true) {
-            try errCheck(c.snd_ctl_pcm_next_device(ctl, &device_i));
+            try err_check(c.snd_ctl_pcm_next_device(ctl, &device_i));
             if (device_i == -1)
                 break;
 
@@ -166,7 +166,7 @@ pub fn init() !ALSAAudio {
 
     // pcm
     var pcm_handle: ?*c.snd_pcm_t = null;
-    try errCheck(c.snd_pcm_open(&pcm_handle, pcm_name, c.SND_PCM_STREAM_PLAYBACK, c.SND_PCM_NONBLOCK));
+    try err_check(c.snd_pcm_open(&pcm_handle, pcm_name, c.SND_PCM_STREAM_PLAYBACK, c.SND_PCM_NONBLOCK));
 
     std.debug.print("\nPCM:\n", .{});
     // TODO: double check we don't need to free any strings
@@ -178,16 +178,16 @@ pub fn init() !ALSAAudio {
     // configure hw
     {
         var hw_params: ?*c.snd_pcm_hw_params_t = null;
-        try errCheck(c.snd_pcm_hw_params_malloc(&hw_params));
+        try err_check(c.snd_pcm_hw_params_malloc(&hw_params));
         defer c.snd_pcm_hw_params_free(hw_params);
 
-        try errCheck(c.snd_pcm_hw_params_any(pcm_handle, hw_params));
-        try errCheck(c.snd_pcm_hw_params_set_access(pcm_handle, hw_params, c.SND_PCM_ACCESS_RW_INTERLEAVED));
+        try err_check(c.snd_pcm_hw_params_any(pcm_handle, hw_params));
+        try err_check(c.snd_pcm_hw_params_set_access(pcm_handle, hw_params, c.SND_PCM_ACCESS_RW_INTERLEAVED));
 
         // select format
         {
             var format_mask: ?*c.snd_pcm_format_mask_t = null;
-            try errCheck(c.snd_pcm_format_mask_malloc(&format_mask));
+            try err_check(c.snd_pcm_format_mask_malloc(&format_mask));
             defer c.snd_pcm_format_mask_free(format_mask);
             c.snd_pcm_hw_params_get_format_mask(hw_params, format_mask);
 
@@ -210,15 +210,15 @@ pub fn init() !ALSAAudio {
             }
         }
 
-        try errCheck(c.snd_pcm_hw_params_set_format(pcm_handle, hw_params, format));
-        try errCheck(c.snd_pcm_hw_params_set_subformat(pcm_handle, hw_params, subformat));
-        try errCheck(c.snd_pcm_hw_params_set_rate_near(pcm_handle, hw_params, &sample_rate, 0));
-        try errCheck(c.snd_pcm_hw_params_set_period_size_near(pcm_handle, hw_params, &frame_size, 0));
-        try errCheck(c.snd_pcm_hw_params_set_channels_near(pcm_handle, hw_params, &channel_count));
+        try err_check(c.snd_pcm_hw_params_set_format(pcm_handle, hw_params, format));
+        try err_check(c.snd_pcm_hw_params_set_subformat(pcm_handle, hw_params, subformat));
+        try err_check(c.snd_pcm_hw_params_set_rate_near(pcm_handle, hw_params, &sample_rate, 0));
+        try err_check(c.snd_pcm_hw_params_set_period_size_near(pcm_handle, hw_params, &frame_size, 0));
+        try err_check(c.snd_pcm_hw_params_set_channels_near(pcm_handle, hw_params, &channel_count));
 
         period_size = frame_size * channel_count;
-        try errCheck(c.snd_pcm_hw_params_set_buffer_size_near(pcm_handle, hw_params, &period_size));
-        try errCheck(c.snd_pcm_hw_params(pcm_handle, hw_params));
+        try err_check(c.snd_pcm_hw_params_set_buffer_size_near(pcm_handle, hw_params, &period_size));
+        try err_check(c.snd_pcm_hw_params(pcm_handle, hw_params));
 
         format_width = @intCast(c.snd_pcm_format_physical_width(format));
         buffer_size = @as(u32, @intCast(period_size)) * (format_width >> 3);
@@ -239,14 +239,14 @@ pub fn init() !ALSAAudio {
 
     // TODO: does not seem to work, needs more investigation
     // avoid initial "click"
-    try errCheck(c.snd_pcm_format_set_silence(format, audio_data.ptr, @truncate(frame_size)));
+    try err_check(c.snd_pcm_format_set_silence(format, audio_data.ptr, @truncate(frame_size)));
 
     for (&wavetable_sine, 0..wavetable_len) |*sample, index| {
         const phase: f64 = @as(f64, @floatFromInt(index)) / @as(f64, @floatFromInt(wavetable_len));
         sample.* = @sin(std.math.tau * phase);
     }
 
-    return ALSAAudio{
+    return AlsaAudio{
         .audio_data = audio_data,
         .pcm_handle = pcm_handle,
         .samples_tot = 0,
