@@ -5,21 +5,45 @@ const c = @cImport({
 
 // DOCS: https://docs.vulkan.org/spec/latest/index.html
 
-const instance_extension_count_max = 64;
-const instance_layer_count_max = 64;
-const physical_device_count_max = 8;
-const queue_family_count_max = 16;
-const physical_device_group_count_max = 16;
-const device_extension_count_max = 512;
-const device_layer_count_max = 16;
-
 const VulkanGfx = struct {
-    instance: c.VkInstance,
-    device: c.VkDevice,
+    const State = struct {
+        const instance_extension_count_max = 64;
+        const instance_layer_count_max = 64;
+        const physical_device_count_max = 8;
+        const queue_family_count_max = 16;
+        const physical_device_group_count_max = 16;
+        const device_extension_count_max = 512;
+        const device_layer_count_max = 16;
+
+        instance_version: u32 = 0,
+        instance_extension_count: u32 = instance_extension_count_max,
+        instance_extension: [instance_extension_count_max]c.VkExtensionProperties = undefined,
+        instance_layer_count: u32 = instance_layer_count_max,
+        instance_layer: [instance_layer_count_max]c.VkLayerProperties = undefined,
+        instance: c.VkInstance = null,
+        physical_device_count: u32 = physical_device_count_max,
+        physical_device: [physical_device_count_max]c.VkPhysicalDevice = undefined,
+        physical_device_properties: [physical_device_count_max]c.VkPhysicalDeviceProperties = undefined,
+        physical_device_features: [physical_device_count_max]c.VkPhysicalDeviceFeatures = undefined,
+        physical_device_gpu_main_index: usize = 0,
+        // TODO: this is per physical device, so should be stored differently
+        queue_family_count: u32 = queue_family_count_max,
+        queue_family: [queue_family_count_max]c.VkQueueFamilyProperties = undefined,
+        physical_device_group_count: u32 = physical_device_group_count_max,
+        physical_device_group: [physical_device_group_count_max]c.VkPhysicalDeviceGroupProperties = undefined,
+        device_extension_count: u32 = device_extension_count_max,
+        device_extension: [device_extension_count_max]c.VkExtensionProperties = undefined,
+        device: c.VkDevice = null,
+    };
+
+    state: State,
+
+    // TODO: make better
+    queue_family_main_gpu_index: u32,
 
     pub fn kill(self: VulkanGfx) void {
-        c.vkDestroyDevice(self.device, null);
-        c.vkDestroyInstance(self.instance, null);
+        c.vkDestroyDevice(self.state.device, null);
+        c.vkDestroyInstance(self.state.instance, null);
     }
 
     pub fn update(_: VulkanGfx) void {}
@@ -42,35 +66,33 @@ fn err_check_allow_incomplete(result: c.VkResult) !void {
 pub fn init() !VulkanGfx {
     std.debug.print("\n=== Vulkan ===\n", .{});
 
+    var state = VulkanGfx.State{};
+
     // instance
     // DOCS: https://docs.vulkan.org/spec/latest/chapters/initialization.html#initialization-instances
 
-    var instance: c.VkInstance = null;
     {
         // instance version
         {
-            var instance_version: u32 = 0;
-            try err_check(c.vkEnumerateInstanceVersion(&instance_version));
-            std.debug.print("Supported API Version: {}.{}.{}", .{
-                c.VK_VERSION_MAJOR(instance_version),
-                c.VK_VERSION_MINOR(instance_version),
-                c.VK_VERSION_PATCH(instance_version),
+            try err_check(c.vkEnumerateInstanceVersion(&state.instance_version));
+            std.debug.print("\nSupported API Version: {}.{}.{}\n", .{
+                c.VK_VERSION_MAJOR(state.instance_version),
+                c.VK_VERSION_MINOR(state.instance_version),
+                c.VK_VERSION_PATCH(state.instance_version),
             });
         }
 
         // instance extensions
         {
-            var instance_extension_count: u32 = instance_extension_count_max;
-            var instance_extension_buf: [instance_extension_count_max]c.VkExtensionProperties = undefined;
             try err_check_allow_incomplete(c.vkEnumerateInstanceExtensionProperties(
                 null,
-                &instance_extension_count,
-                &instance_extension_buf[0],
+                &state.instance_extension_count,
+                &state.instance_extension[0],
             ));
-            const instance_extensions = instance_extension_buf[0..instance_extension_count];
 
-            std.debug.print("\nAvailable Instance Extensions ({}):\n", .{instance_extension_count});
-            for (instance_extensions) |extension| {
+            std.debug.print("\nAvailable Instance Extensions ({}):\n", .{state.instance_extension_count});
+            for (0..state.instance_extension_count) |index| {
+                const extension = state.instance_extension[index];
                 std.debug.print("- {s} (v{})\n", .{
                     extension.extensionName,
                     extension.specVersion,
@@ -80,17 +102,18 @@ pub fn init() !VulkanGfx {
 
         // instance layers
         {
-            var instance_layer_count: u32 = instance_layer_count_max;
-            var instance_layer_buf: [instance_layer_count_max]c.VkLayerProperties = undefined;
             try err_check_allow_incomplete(c.vkEnumerateInstanceLayerProperties(
-                &instance_layer_count,
-                &instance_layer_buf[0],
+                &state.instance_layer_count,
+                &state.instance_layer[0],
             ));
-            const instance_layers = instance_layer_buf[0..instance_layer_count];
 
-            std.debug.print("\nAvailable Instance Layers ({}):\n", .{instance_layer_count});
-            for (instance_layers) |instance_layer| {
-                std.debug.print("- {s} ({s})\n", .{ instance_layer.layerName, instance_layer.description });
+            std.debug.print("\nAvailable Instance Layers ({}):\n", .{state.instance_layer_count});
+            for (0..state.instance_layer_count) |index| {
+                const layer = state.instance_layer[index];
+                std.debug.print("- {s} ({s})\n", .{
+                    layer.layerName,
+                    layer.description,
+                });
             }
         }
 
@@ -105,78 +128,76 @@ pub fn init() !VulkanGfx {
                 .apiVersion = c.VK_MAKE_VERSION(1, 1, 0),
             };
 
-            const instanceCreateInfo = c.VkInstanceCreateInfo{
+            const instance_create_info = c.VkInstanceCreateInfo{
                 .sType = c.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
                 .pApplicationInfo = &application_info,
             };
 
-            try err_check(c.vkCreateInstance(&instanceCreateInfo, null, &instance));
+            try err_check(c.vkCreateInstance(&instance_create_info, null, &state.instance));
         }
     }
 
     // physical device
     // DOCS: https://docs.vulkan.org/spec/latest/chapters/devsandqueues.html#devsandqueues-physical-device-enumeration
 
-    var physical_device_main_gpu: c.VkPhysicalDevice = null;
     {
-        var physical_device_count: u32 = physical_device_count_max;
-        var physical_device_buf: [physical_device_count_max]c.VkPhysicalDevice = undefined;
         try err_check_allow_incomplete(c.vkEnumeratePhysicalDevices(
-            instance,
-            &physical_device_count,
-            &physical_device_buf[0],
+            state.instance,
+            &state.physical_device_count,
+            &state.physical_device[0],
         ));
-        const physical_devices = physical_device_buf[0..physical_device_count];
 
-        std.debug.print("\nAvailable Physical Devices ({})\n", .{physical_device_count});
-        for (physical_devices) |physical_device| {
-            var physical_device_properties: c.VkPhysicalDeviceProperties = undefined;
-            c.vkGetPhysicalDeviceProperties(physical_device, &physical_device_properties);
+        // fill structures
+        for (0..state.physical_device_count) |index| {
+            const physical_device = state.physical_device[index];
+            c.vkGetPhysicalDeviceProperties(physical_device, &state.physical_device_properties[index]);
+            c.vkGetPhysicalDeviceFeatures(physical_device, &state.physical_device_features[index]);
+        }
 
-            var physical_device_features: c.VkPhysicalDeviceFeatures = undefined;
-            c.vkGetPhysicalDeviceFeatures(physical_device, &physical_device_features);
-
-            const select_gpu =
-                physical_device_main_gpu == null and
-                physical_device_properties.deviceType == c.VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
-
-            if (select_gpu) {
-                physical_device_main_gpu = physical_device;
+        // find main gpu
+        for (0..state.physical_device_count) |index| {
+            const properties = state.physical_device_properties[index];
+            if (properties.deviceType == c.VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+                state.physical_device_gpu_main_index = index;
+                break;
             }
+        }
 
+        std.debug.print("\nAvailable Physical Devices ({})\n", .{state.physical_device_count});
+        for (0..state.physical_device_count) |index| {
+            const properties = state.physical_device_properties[index];
             std.debug.print("- {s} ({s}){s}\n", .{
-                physical_device_properties.deviceName,
-                switch (physical_device_properties.deviceType) {
+                properties.deviceName,
+                switch (properties.deviceType) {
                     c.VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU => "Integrated GPU",
                     c.VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU => "Discrete GPU",
                     c.VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU => "Virtual GPU",
                     c.VK_PHYSICAL_DEVICE_TYPE_CPU => "CPU",
                     else => "Unknown",
                 },
-                if (select_gpu) " [Selected GPU]" else "",
+                if (index == state.physical_device_gpu_main_index) " [Selected GPU]" else "",
             });
         }
     }
-    std.debug.assert(physical_device_main_gpu != null);
 
     // queue families
     var queue_family_main_gpu: ?c.VkQueueFamilyProperties = null;
+    var queue_family_main_gpu_index: u32 = 0;
     {
-        var queue_family_count: u32 = queue_family_count_max;
-        var queue_family_buf: [queue_family_count_max]c.VkQueueFamilyProperties = undefined;
         c.vkGetPhysicalDeviceQueueFamilyProperties(
-            physical_device_main_gpu,
-            &queue_family_count,
-            &queue_family_buf[0],
+            state.physical_device[state.physical_device_gpu_main_index],
+            &state.queue_family_count,
+            &state.queue_family[0],
         );
-        const queue_families = queue_family_buf[0..queue_family_count];
 
-        std.debug.print("\nAvailable Queue Families ({})\n", .{queue_family_count});
-        for (queue_families) |queue_family| {
+        std.debug.print("\nAvailable Queue Families ({})\n", .{state.queue_family_count});
+        for (0..state.queue_family_count) |index| {
+            const queue_family = state.queue_family[index];
             const mask = c.VK_QUEUE_GRAPHICS_BIT | c.VK_QUEUE_COMPUTE_BIT | c.VK_QUEUE_TRANSFER_BIT;
             const select = queue_family_main_gpu == null and (queue_family.queueFlags & mask) != 0;
             if (select) {
                 queue_family_main_gpu = queue_family;
+                queue_family_main_gpu_index = @intCast(index);
             }
             std.debug.print("  - {b:9}{s}\n", .{
                 queue_family.queueFlags,
@@ -188,17 +209,15 @@ pub fn init() !VulkanGfx {
 
     // NOTE: I don't have a computer supporting groups, they're all size:1, so can't really test this out
     {
-        var physical_device_group_count: u32 = physical_device_group_count_max;
-        var physical_device_group_buf: [physical_device_group_count_max]c.VkPhysicalDeviceGroupProperties = undefined;
         try err_check_allow_incomplete(c.vkEnumeratePhysicalDeviceGroups(
-            instance,
-            &physical_device_group_count,
-            &physical_device_group_buf[0],
+            state.instance,
+            &state.physical_device_group_count,
+            &state.physical_device_group[0],
         ));
-        const physical_device_groups = physical_device_group_buf[0..physical_device_group_count];
 
-        std.debug.print("\nAvailable Physical Device Groups ({})\n", .{physical_device_group_count});
-        for (physical_device_groups) |physical_device_group| {
+        std.debug.print("\nAvailable Physical Device Groups ({})\n", .{state.physical_device_group_count});
+        for (0..state.physical_device_count) |index| {
+            const physical_device_group = state.physical_device_group[index];
             std.debug.print("  - size:{}\n", .{physical_device_group.physicalDeviceCount});
         }
     }
@@ -206,22 +225,21 @@ pub fn init() !VulkanGfx {
     // device
     // DOCS: https://docs.vulkan.org/spec/latest/chapters/devsandqueues.html#devsandqueues-devices
 
-    var device: c.VkDevice = null;
+    var queue: c.VkQueue = null;
+    const device_queue_index = 0;
     {
         // device extensions
         {
-            var device_extension_count: u32 = device_extension_count_max;
-            var device_extension_buf: [device_extension_count_max]c.VkExtensionProperties = undefined;
             try err_check_allow_incomplete(c.vkEnumerateDeviceExtensionProperties(
-                physical_device_main_gpu,
+                state.physical_device[state.physical_device_gpu_main_index],
                 null,
-                &device_extension_count,
-                &device_extension_buf[0],
+                &state.device_extension_count,
+                &state.device_extension[0],
             ));
-            const device_extensions = device_extension_buf[0..device_extension_count];
 
-            std.debug.print("\nAvailable Device Extensions ({}):\n", .{device_extension_count});
-            for (device_extensions) |extension| {
+            std.debug.print("\nAvailable Device Extensions ({}):\n", .{state.device_extension_count});
+            for (0..state.device_extension_count) |index| {
+                const extension = state.device_extension[index];
                 // TODO: not sure why names end with �
                 std.debug.print("- {s} (v{})\n", .{
                     extension.extensionName,
@@ -230,14 +248,23 @@ pub fn init() !VulkanGfx {
             }
         }
 
-        // device
+        // device & queue
         {
+            const device_queue_create_info = c.VkDeviceQueueCreateInfo{
+                .sType = c.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+                .pNext = null,
+                .flags = 0,
+                .queueFamilyIndex = queue_family_main_gpu_index,
+                .queueCount = 1,
+                .pQueuePriorities = &@as(f32, 1.0),
+            };
+
             const device_create_info = c.VkDeviceCreateInfo{
                 .sType = c.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
                 .pNext = null,
                 .flags = 0,
-                .queueCreateInfoCount = 0,
-                .pQueueCreateInfos = null,
+                .queueCreateInfoCount = 1,
+                .pQueueCreateInfos = &device_queue_create_info,
                 .enabledLayerCount = 0,
                 .ppEnabledLayerNames = null,
                 .enabledExtensionCount = 0,
@@ -245,17 +272,24 @@ pub fn init() !VulkanGfx {
                 .pEnabledFeatures = null,
             };
             try err_check(c.vkCreateDevice(
-                physical_device_main_gpu,
+                state.physical_device[state.physical_device_gpu_main_index],
                 &device_create_info,
                 null,
-                &device,
+                &state.device,
             ));
+            c.vkGetDeviceQueue(
+                state.device,
+                queue_family_main_gpu_index,
+                device_queue_index,
+                &queue,
+            );
         }
     }
-    std.debug.assert(device != null);
+    std.debug.assert(state.device != null);
+    std.debug.assert(queue != null);
 
     return VulkanGfx{
-        .instance = instance,
-        .device = device,
+        .state = state,
+        .queue_family_main_gpu_index = queue_family_main_gpu_index,
     };
 }
