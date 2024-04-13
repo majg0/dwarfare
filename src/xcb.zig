@@ -8,8 +8,9 @@ const Input = @import("input.zig").Input;
 // DOCS: https://www.x.org/releases/X11R7.5/doc/x11proto/proto.pdf
 // DOCS: https://specifications.freedesktop.org/wm-spec/1.4/ar01s05.html
 
-const XcbUi = struct {
+pub const XcbUi = struct {
     connection: *c.struct_xcb_connection_t,
+    window: u32,
     wm_delete_window_atom: u32,
 
     pub fn consume_events(self: *XcbUi, input: *Input) void {
@@ -298,6 +299,7 @@ pub fn init() !XcbUi {
 
     return XcbUi{
         .connection = connection,
+        .window = window,
         .wm_delete_window_atom = wm_delete_window_atom,
     };
 }
