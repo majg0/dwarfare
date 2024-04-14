@@ -10,6 +10,27 @@ pub fn build(b: *std.Build) void {
     {
         const install_step = b.getInstallStep();
 
+        // NOTE: compile shaders
+        {
+            const runs: [2]*std.Build.Step.Run = .{
+                b.addSystemCommand(&.{
+                    "glslc",
+                    "shaders/shader.vert",
+                    "-o",
+                    "shaders/shader.vert.spv",
+                }),
+                b.addSystemCommand(&.{
+                    "glslc",
+                    "shaders/shader.frag",
+                    "-o",
+                    "shaders/shader.frag.spv",
+                }),
+            };
+            for (runs) |run| {
+                install_step.dependOn(&run.step);
+            }
+        }
+
         // NOTE: exe
         {
             const exe_compile = b.addExecutable(.{

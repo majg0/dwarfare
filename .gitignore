@@ -1,5 +1,6 @@
 # vulkan
 vkvia.html
+*.spv
 
 # zig
 zig-cache
