@@ -9,17 +9,10 @@ pub const Binding = struct {
                 press,
                 release,
             },
-            key: enum(u8) {
-                button1 = 1,
-                button2 = 2,
-                button3 = 3,
-                button4 = 4,
-                button5 = 5,
-                esc = 9,
-            },
+            key: u8,
 
             fn check(self: Physical, keys: Input.Keys) bool {
-                const index = @intFromEnum(self.key);
+                const index = self.key;
                 return switch (self.event) {
                     .down => keys.down(index),
                     .up => keys.up(index),

@@ -15,7 +15,7 @@ pub const XcbUi = struct {
     window: c.xcb_window_t = int_invalid,
     wm_delete_window_atom: c.xcb_atom_t = int_invalid,
 
-    pub fn frameConsume(self: *XcbUi, input: *Input) void {
+    pub fn eventsPoll(self: *XcbUi, input: *Input) void {
         for (0..100) |_| {
             const generic_event: *c.xcb_generic_event_t = c.xcb_poll_for_event(self.connection) orelse return;
             defer c.free(generic_event);

@@ -3,6 +3,74 @@ const c = @cImport({
     @cInclude("alsa/asoundlib.h");
 });
 
+// TODO: improve
+const frames_per_second = 500;
+
+const Synth = struct {
+    const Timbre = struct {
+        frequencies: [timbre_depth]f64 = undefined,
+        velocities: [timbre_depth]f64 = undefined,
+
+        fn standard_normalized(velocities: [timbre_depth]f64) Timbre {
+            var result = Timbre{
+                .frequencies = .{ 1, 2, 3, 4, 5, 6, 7, 8 },
+                .velocities = velocities,
+            };
+            var sum: f64 = 0;
+            for (velocities) |velocity| {
+                sum += velocity;
+            }
+            const factor = 1 / sum;
+            for (&result.velocities) |*velocity| {
+                velocity.* *= factor;
+            }
+            return result;
+        }
+    };
+    const Voice = struct {
+        phases: [timbre_depth]f64 = blk: {
+            var phases: [timbre_depth]f64 = undefined;
+            for (&phases, 0..) |*phase, index| {
+                // NOTE: opt out of what's known as "auditory fusion"
+                phase.* = @as(f64, @floatFromInt(index)) / @as(f64, @floatFromInt(voice_count));
+            }
+            break :blk phases;
+        },
+        frequency: f64 = 0,
+        // velocity: f64 = 0,
+        timbre_index: usize = Synth.timbre_index_violin,
+        // envelope_state: EnvelopeState = .{},
+        // waveform_index: usize = 0,
+    };
+
+    const voice_count = 1;
+    const timbre_depth = 8;
+    const timbre = [_]Timbre{
+        Timbre.standard_normalized(.{ 1, 0, 0, 0, 0, 0, 0, 0 }),
+        Timbre.standard_normalized(blk: {
+            var velocities: [timbre_depth]f64 = undefined;
+            for (&velocities, 0..) |*velocity, index| {
+                velocity.* = 1.0 / @as(f64, @floatFromInt(1 << index));
+            }
+            break :blk velocities;
+        }),
+        Timbre.standard_normalized(.{ 1, 0.75, 0.65, 0.55, 0.5, 0.45, 0.4, 0.35 }),
+    };
+    const timbre_index_sine = 0;
+    const timbre_index_harmonic = 1;
+    const timbre_index_violin = 2;
+
+    voice: Voice = .{ .frequency = 440 },
+};
+
+// const EnvelopeState = struct {
+//     envelope_index: usize = 0,
+//     state_index: i32 = -1,
+//     phase: f64 = 0,
+//     value_start: f64 = 0,
+//     value: f64 = 0,
+// };
+
 const AlsaAudio = struct {
     audio_data: []u8,
     pcm_handle: ?*c.snd_pcm_t,
@@ -14,6 +82,7 @@ const AlsaAudio = struct {
     format: i32,
     format_width: u32,
     master_volume: f64,
+    synth: Synth = .{},
 
     pub fn kill(self: *AlsaAudio) void {
         self.arena.deinit();
@@ -27,10 +96,13 @@ const AlsaAudio = struct {
                 return error.AlsaXRun;
             } else try err_check(@truncate(avail));
 
-            const samples_written = c.snd_pcm_writei(self.pcm_handle, self.audio_data.ptr, self.frame_size);
+            const samples_written = c.snd_pcm_writei(
+                self.pcm_handle,
+                self.audio_data.ptr,
+                self.frame_size,
+            );
             if (samples_written == -c.EAGAIN) {
-                // The PCM device is not ready for more data, skip this cycle.
-                // TODO: we could yield null here to break a loop
+                // NOTE: The PCM device is not ready for more data, skip this cycle.
                 return;
             }
 
@@ -39,50 +111,65 @@ const AlsaAudio = struct {
             } else {
                 std.debug.assert(samples_written == self.frame_size);
 
-                // TODO: we could yield to consumer here for handling the frame
                 self.samples_tot += @intCast(samples_written);
 
                 // interleaved write
                 for (0..self.frame_size) |sample_local| {
-                    const sample_global = self.samples_tot + sample_local;
                     const step = 1.0 / @as(f64, @floatFromInt(self.sample_rate));
-                    const phase_root = @as(f64, @floatFromInt(sample_global % self.sample_rate)) * step;
 
-                    const vol = 0.5 * self.master_volume;
-                    const amp = wavetable_read(wavetable_sine, 440 * phase_root);
+                    var amplitude: f64 = 0;
+                    var voice = &self.synth.voice;
+                    for (&voice.phases, 0..) |*phase, phase_index| {
+                        const timbre = Synth.timbre[voice.timbre_index];
+                        phase.* += voice.frequency * timbre.frequencies[phase_index] * step;
+                        phase.* -= std.math.modf(phase.*).ipart;
+                        amplitude += wavetable_read(wavetable_sine, phase.*) *
+                            timbre.velocities[phase_index];
+                    }
+
+                    amplitude = std.math.clamp(amplitude, -1, 1);
+
+                    const volume = 0.5 * self.master_volume;
                     for (0..self.channel_count) |channel_index| {
                         const i = sample_local * self.channel_count + channel_index;
 
                         switch (self.format) {
                             c.SND_PCM_FORMAT_FLOAT64_LE => {
-                                std.mem.bytesAsSlice(f64, self.audio_data)[i] = vol * amp;
+                                std.mem.bytesAsSlice(f64, self.audio_data)[i] = volume * amplitude;
                             },
                             c.SND_PCM_FORMAT_FLOAT_LE => {
-                                std.mem.bytesAsSlice(f32, self.audio_data)[i] = @floatCast(vol * amp);
+                                std.mem.bytesAsSlice(f32, self.audio_data)[i] =
+                                    @floatCast(volume * amplitude);
                             },
                             c.SND_PCM_FORMAT_S32_LE => {
                                 const range: f64 = comptime @floatFromInt(1 << 31);
-                                std.mem.bytesAsSlice(i32, self.audio_data)[i] = @intFromFloat(range * vol * amp);
+                                std.mem.bytesAsSlice(i32, self.audio_data)[i] =
+                                    @intFromFloat(range * volume * amplitude);
                             },
                             c.SND_PCM_FORMAT_S16_LE => {
                                 const range: f64 = comptime @floatFromInt(1 << 15);
-                                std.mem.bytesAsSlice(i16, self.audio_data)[i] = @intFromFloat(range * vol * amp);
+                                std.mem.bytesAsSlice(i16, self.audio_data)[i] =
+                                    @intFromFloat(range * volume * amplitude);
                             },
                             c.SND_PCM_FORMAT_S8 => {
                                 const range: f64 = comptime @floatFromInt(1 << 7);
-                                std.mem.bytesAsSlice(i8, self.audio_data)[i] = @intFromFloat(range * vol * amp);
+                                std.mem.bytesAsSlice(i8, self.audio_data)[i] =
+                                    @intFromFloat(range * volume * amplitude);
                             },
                             c.SND_PCM_FORMAT_U32_LE => {
                                 const range: f64 = comptime @floatFromInt(1 << 31);
-                                std.mem.bytesAsSlice(u32, self.audio_data)[i] = @intFromFloat((range - 1.0) * (vol * amp) + range);
+                                std.mem.bytesAsSlice(u32, self.audio_data)[i] =
+                                    @intFromFloat((range - 1.0) * (volume * amplitude) + range);
                             },
                             c.SND_PCM_FORMAT_U16_LE => {
                                 const range: f64 = comptime @floatFromInt(1 << 15);
-                                std.mem.bytesAsSlice(u16, self.audio_data)[i] = @intFromFloat((range - 1.0) * (vol * amp) + range);
+                                std.mem.bytesAsSlice(u16, self.audio_data)[i] =
+                                    @intFromFloat((range - 1.0) * (volume * amplitude) + range);
                             },
                             c.SND_PCM_FORMAT_U8 => {
                                 const range: f64 = comptime @floatFromInt(1 << 7);
-                                self.audio_data[i] = @intFromFloat((range - 1.0) * (vol * amp) + range);
+                                self.audio_data[i] = @intFromFloat((range - 1.0) *
+                                    (volume * amplitude) + range);
                             },
                             else => {
                                 std.debug.print("missing format implementation {}", .{self.format});
@@ -155,7 +242,6 @@ pub fn init() !AlsaAudio {
     const pcm_name = "default";
 
     var sample_rate: u32 = 44100; // CD quality audio; 2*2*3*3*5*5*7*7
-    const frames_per_second = 5; // 3*3
     var frame_size: c.snd_pcm_uframes_t = sample_rate / frames_per_second;
     var period_size: c.snd_pcm_uframes_t = 0;
     var buffer_size: u32 = 0;
