@@ -8,12 +8,14 @@ const Input = @import("input.zig").Input;
 // DOCS: https://www.x.org/releases/X11R7.5/doc/x11proto/proto.pdf
 // DOCS: https://specifications.freedesktop.org/wm-spec/1.4/ar01s05.html
 
-pub const XcbUi = struct {
-    connection: *c.struct_xcb_connection_t,
-    window: u32,
-    wm_delete_window_atom: u32,
+const int_invalid = 0xDEAD;
 
-    pub fn consume_events(self: *XcbUi, input: *Input) void {
+pub const XcbUi = struct {
+    connection: *c.struct_xcb_connection_t = @ptrFromInt(int_invalid),
+    window: c.xcb_window_t = int_invalid,
+    wm_delete_window_atom: c.xcb_atom_t = int_invalid,
+
+    pub fn frameConsume(self: *XcbUi, input: *Input) void {
         for (0..100) |_| {
             const generic_event: *c.xcb_generic_event_t = c.xcb_poll_for_event(self.connection) orelse return;
             defer c.free(generic_event);
@@ -67,6 +69,7 @@ pub const XcbUi = struct {
                 c.XCB_EXPOSE => {
                     const e: *c.xcb_expose_event_t = @ptrCast(generic_event);
                     std.debug.print("0x{X} Expose ({},{},{},{})\n", .{ e.window, e.x, e.y, e.width, e.height });
+                    input.wm.flags |= @intFromEnum(Input.Wm.Event.resize);
                 },
                 c.XCB_VISIBILITY_NOTIFY => {
                     const e: *c.xcb_visibility_notify_event_t = @ptrCast(generic_event);
@@ -175,7 +178,7 @@ pub const XcbUi = struct {
                         8 => {},
                         16 => {},
                         32 => if (e.data.data32[0] == self.wm_delete_window_atom) {
-                            input.wm.flags |= @intFromEnum(Input.Wm.Event.delete_window);
+                            input.wm.flags |= @intFromEnum(Input.Wm.Event.delete);
                         },
                         else => {},
                     }
@@ -190,119 +193,179 @@ pub const XcbUi = struct {
     pub fn kill(self: XcbUi) void {
         c.xcb_disconnect(self.connection);
     }
-};
 
-pub fn init() !XcbUi {
-    std.debug.print("\n=== XCB ===\n", .{});
+    pub fn init(self: *XcbUi) !void {
+        std.debug.print("\n=== XCB ===\n", .{});
 
-    const connection: *c.struct_xcb_connection_t = c.xcb_connect(null, null) orelse {
-        return error.XcbConnectionMissing;
-    };
+        self.connection = c.xcb_connect(null, null) orelse {
+            return error.XcbConnectionMissing;
+        };
+        std.debug.assert(self.connection != @as(*c.xcb_connection_t, @ptrFromInt(int_invalid)));
 
-    if (c.xcb_connection_has_error(connection) != 0) {
-        return error.XcbConnectionError;
-    }
+        if (c.xcb_connection_has_error(self.connection) != 0) {
+            return error.XcbConnectionError;
+        }
 
-    const setup: *const c.xcb_setup_t = c.xcb_get_setup(connection) orelse return error.XcbSetup;
-    var iter = c.xcb_setup_roots_iterator(setup);
-    const first_screen = iter.data.*;
-    // NOTE: rem is confusingly 1 on the last iterator element, when there is 0 remaining
-    while (iter.rem != 0) {
-        const screen = iter.data.*;
-        std.debug.print("Screen {} ({} x {} px / {} x {} mm)\n", .{ iter.index, screen.width_in_pixels, screen.height_in_pixels, screen.width_in_millimeters, screen.height_in_millimeters });
-        c.xcb_screen_next(&iter);
-    }
+        const setup: *const c.xcb_setup_t = c.xcb_get_setup(self.connection) orelse return error.XcbSetup;
+        var iter = c.xcb_setup_roots_iterator(setup);
+        const first_screen = iter.data.*;
+        // NOTE: rem is confusingly 1 on the last iterator element, when there is 0 remaining
+        while (iter.rem != 0) {
+            const screen = iter.data.*;
+            std.debug.print("Screen {} ({} x {} px / {} x {} mm)\n", .{
+                iter.index,
+                screen.width_in_pixels,
+                screen.height_in_pixels,
+                screen.width_in_millimeters,
+                screen.height_in_millimeters,
+            });
+            c.xcb_screen_next(&iter);
+        }
 
-    const window = c.xcb_generate_id(connection);
-    const value_mask: u32 = c.XCB_CW_EVENT_MASK;
-    const value_list = [_]u32{
-        c.XCB_EVENT_MASK_KEY_PRESS |
-            c.XCB_EVENT_MASK_KEY_RELEASE |
-            c.XCB_EVENT_MASK_BUTTON_PRESS |
-            c.XCB_EVENT_MASK_BUTTON_RELEASE |
-            c.XCB_EVENT_MASK_ENTER_WINDOW |
-            c.XCB_EVENT_MASK_LEAVE_WINDOW |
-            c.XCB_EVENT_MASK_POINTER_MOTION |
-            c.XCB_EVENT_MASK_EXPOSURE |
-            c.XCB_EVENT_MASK_VISIBILITY_CHANGE |
-            c.XCB_EVENT_MASK_STRUCTURE_NOTIFY |
-            c.XCB_EVENT_MASK_FOCUS_CHANGE |
-            c.XCB_EVENT_MASK_PROPERTY_CHANGE,
-    };
+        self.window = c.xcb_generate_id(self.connection);
+        std.debug.assert(self.window != int_invalid);
+        const value_mask: u32 = c.XCB_CW_EVENT_MASK;
+        const value_list = [_]u32{
+            c.XCB_EVENT_MASK_KEY_PRESS |
+                c.XCB_EVENT_MASK_KEY_RELEASE |
+                c.XCB_EVENT_MASK_BUTTON_PRESS |
+                c.XCB_EVENT_MASK_BUTTON_RELEASE |
+                c.XCB_EVENT_MASK_ENTER_WINDOW |
+                c.XCB_EVENT_MASK_LEAVE_WINDOW |
+                c.XCB_EVENT_MASK_POINTER_MOTION |
+                c.XCB_EVENT_MASK_EXPOSURE |
+                c.XCB_EVENT_MASK_VISIBILITY_CHANGE |
+                c.XCB_EVENT_MASK_STRUCTURE_NOTIFY |
+                c.XCB_EVENT_MASK_FOCUS_CHANGE |
+                c.XCB_EVENT_MASK_PROPERTY_CHANGE,
+        };
 
-    _ = c.xcb_create_window(connection, c.XCB_COPY_FROM_PARENT, window, first_screen.root, 0, 0, 200, 200, 0, c.XCB_WINDOW_CLASS_INPUT_OUTPUT, first_screen.root_visual, value_mask, &value_list);
+        _ = c.xcb_create_window(
+            self.connection,
+            c.XCB_COPY_FROM_PARENT,
+            self.window,
+            first_screen.root,
+            0,
+            0,
+            200,
+            200,
+            0,
+            c.XCB_WINDOW_CLASS_INPUT_OUTPUT,
+            first_screen.root_visual,
+            value_mask,
+            &value_list,
+        );
 
-    const title = "dwarfare";
-    _ = c.xcb_change_property(connection, c.XCB_PROP_MODE_REPLACE, window, c.XCB_ATOM_WM_NAME, c.XCB_ATOM_STRING, 8, title.len, title);
+        const title = "dwarfare";
+        _ = c.xcb_change_property(
+            self.connection,
+            c.XCB_PROP_MODE_REPLACE,
+            self.window,
+            c.XCB_ATOM_WM_NAME,
+            c.XCB_ATOM_STRING,
+            8,
+            title.len,
+            title,
+        );
 
-    // TODO: how to use?
-    const title_icon = "dwarfare (icon)";
-    _ = c.xcb_change_property(connection, c.XCB_PROP_MODE_REPLACE, window, c.XCB_ATOM_WM_ICON_NAME, c.XCB_ATOM_STRING, 8, title_icon.len, title_icon);
+        // TODO: how to use?
+        const title_icon = "dwarfare (icon)";
+        _ = c.xcb_change_property(
+            self.connection,
+            c.XCB_PROP_MODE_REPLACE,
+            self.window,
+            c.XCB_ATOM_WM_ICON_NAME,
+            c.XCB_ATOM_STRING,
+            8,
+            title_icon.len,
+            title_icon,
+        );
 
-    _ = c.xcb_map_window(connection, window);
+        _ = c.xcb_map_window(self.connection, self.window);
 
-    const wm_protocols_str = "WM_PROTOCOLS";
-    const wm_protocols_cookie = c.xcb_intern_atom(connection, 1, @intCast(wm_protocols_str.len), wm_protocols_str.ptr);
+        const wm_protocols_str = "WM_PROTOCOLS";
+        const wm_protocols_cookie = c.xcb_intern_atom(
+            self.connection,
+            1,
+            @intCast(wm_protocols_str.len),
+            wm_protocols_str.ptr,
+        );
 
-    const wm_delete_window_str = "WM_DELETE_WINDOW";
-    const wm_delete_window_cookie = c.xcb_intern_atom(connection, 0, @intCast(wm_delete_window_str.len), wm_delete_window_str.ptr);
+        const wm_delete_window_str = "WM_DELETE_WINDOW";
+        const wm_delete_window_cookie = c.xcb_intern_atom(
+            self.connection,
+            0,
+            @intCast(wm_delete_window_str.len),
+            wm_delete_window_str.ptr,
+        );
 
-    const wm_protocols_atom = try intern_atom_reply(connection, wm_protocols_cookie);
-    const wm_delete_window_atom = try intern_atom_reply(connection, wm_delete_window_cookie);
+        const wm_protocols_atom = try intern_atom_reply(self.connection, wm_protocols_cookie);
+        self.wm_delete_window_atom = try intern_atom_reply(self.connection, wm_delete_window_cookie);
 
-    var wm_protocol_atoms: [1]c.xcb_atom_t = .{wm_delete_window_atom};
-    _ = c.xcb_change_property(connection, c.XCB_PROP_MODE_REPLACE, window, wm_protocols_atom, c.XCB_ATOM_ATOM, 32, 1, &wm_protocol_atoms);
+        _ = c.xcb_change_property(
+            self.connection,
+            c.XCB_PROP_MODE_REPLACE,
+            self.window,
+            wm_protocols_atom,
+            c.XCB_ATOM_ATOM,
+            32,
+            1,
+            &self.wm_delete_window_atom,
+        );
 
-    _ = c.xcb_flush(connection);
+        _ = c.xcb_flush(self.connection);
 
-    {
-        const first_keycode = setup.min_keycode;
-        const count = setup.max_keycode - setup.min_keycode;
+        {
+            const first_keycode = setup.min_keycode;
+            const count = setup.max_keycode - setup.min_keycode;
 
-        // TODO: get mapping on MappingNotify
+            // TODO: get mapping on MappingNotify
 
-        const keyboard_mapping = c.xcb_get_keyboard_mapping(connection, first_keycode, count);
-        const reply: *c.xcb_get_keyboard_mapping_reply_t = c.xcb_get_keyboard_mapping_reply(connection, keyboard_mapping, null) orelse return error.XcbKeyMap;
-        defer c.free(reply);
+            const keyboard_mapping = c.xcb_get_keyboard_mapping(
+                self.connection,
+                first_keycode,
+                count,
+            );
+            const reply: *c.xcb_get_keyboard_mapping_reply_t = c.xcb_get_keyboard_mapping_reply(
+                self.connection,
+                keyboard_mapping,
+                null,
+            ) orelse return error.XcbKeyMap;
+            defer c.free(reply);
 
-        const keysyms_per_keycode = reply.keysyms_per_keycode;
-        const keysyms = c.xcb_get_keyboard_mapping_keysyms(reply);
+            const keysyms_per_keycode = reply.keysyms_per_keycode;
+            const keysyms = c.xcb_get_keyboard_mapping_keysyms(reply);
 
-        // TODO: use global preallocated memory with max size
-        var keysym_map = std.AutoArrayHashMap(u32, []const u8).init(std.heap.page_allocator);
+            // TODO: use global preallocated memory with max size
+            var keysym_map = std.AutoArrayHashMap(u32, []const u8).init(std.heap.page_allocator);
 
-        // TODO: fill keysym map with, don't hardcode
-        // xkb_keysym_to_utf8(xkb_keysym_t keysym, char *buffer, size_t size)
-        try keysym_map.putNoClobber(0xff1b, "Escape");
+            // TODO: fill keysym map with, don't hardcode
+            // xkb_keysym_to_utf8(xkb_keysym_t keysym, char *buffer, size_t size)
+            try keysym_map.putNoClobber(0xff1b, "Escape");
 
-        for (first_keycode..(first_keycode + count)) |keycode| {
-            std.debug.print("Keycode {d} -> (", .{keycode});
-            const offset = (keycode - first_keycode) * keysyms_per_keycode;
-            for (0..keysyms_per_keycode) |i| {
-                const index = offset + i;
-                const keysym = keysyms[index];
-                if (keysym == 0) {
-                    break;
-                } else if (i != 0) {
-                    std.debug.print(" ", .{});
+            for (first_keycode..(first_keycode + count)) |keycode| {
+                std.debug.print("Keycode {d} -> (", .{keycode});
+                const offset = (keycode - first_keycode) * keysyms_per_keycode;
+                for (0..keysyms_per_keycode) |i| {
+                    const index = offset + i;
+                    const keysym = keysyms[index];
+                    if (keysym == 0) {
+                        break;
+                    } else if (i != 0) {
+                        std.debug.print(" ", .{});
+                    }
+
+                    if (keysym_map.get(keysym)) |name| {
+                        std.debug.print("{s}", .{name});
+                    } else {
+                        std.debug.print("{x}", .{keysym});
+                    }
                 }
-
-                if (keysym_map.get(keysym)) |name| {
-                    std.debug.print("{s}", .{name});
-                } else {
-                    std.debug.print("{x}", .{keysym});
-                }
+                std.debug.print(")\n", .{});
             }
-            std.debug.print(")\n", .{});
         }
     }
-
-    return XcbUi{
-        .connection = connection,
-        .window = window,
-        .wm_delete_window_atom = wm_delete_window_atom,
-    };
-}
+};
 
 fn intern_atom_reply(connection: *c.xcb_connection_t, cookie: c.xcb_intern_atom_cookie_t) !c.xcb_atom_t {
     var err: [*c]c.xcb_generic_error_t = undefined;

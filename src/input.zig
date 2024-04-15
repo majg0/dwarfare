@@ -61,10 +61,15 @@ pub const Binding = struct {
 pub const Input = struct {
     pub const Wm = struct {
         pub const Event = enum(u8) {
-            delete_window = 0b01,
+            delete = 0b01,
+            resize = 0b10,
         };
 
         flags: u8 = 0,
+
+        fn frameConsume(self: *Wm) void {
+            self.flags = 0;
+        }
     };
 
     pub const Keys = struct {
@@ -95,7 +100,7 @@ pub const Input = struct {
             return (self.prev[index >> 3] & std.math.shl(u8, 1, index & 7)) != 0 and self.up(index);
         }
 
-        fn nextFrame(self: *Keys) void {
+        fn frameConsume(self: *Keys) void {
             std.mem.copyForwards(u8, &self.prev, &self.state);
         }
     };
@@ -103,8 +108,8 @@ pub const Input = struct {
     keys: Keys = .{},
     wm: Wm = .{},
 
-    pub fn update(self: *Input) void {
-        self.keys.nextFrame();
-        self.wm.flags = 0;
+    pub fn frameConsume(self: *Input) void {
+        self.keys.frameConsume();
+        self.wm.frameConsume();
     }
 };

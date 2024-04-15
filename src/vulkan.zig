@@ -18,14 +18,14 @@ const instance_layer_enable = if (builtin.mode == std.builtin.Mode.Debug)
 else
     [_][*c]const u8{};
 const instance_extension_enable = [_][*c]const u8{
-    "VK_KHR_surface",
+    c.VK_KHR_SURFACE_EXTENSION_NAME,
     if (builtin.os.tag == std.Target.Os.Tag.linux)
-        "VK_KHR_xcb_surface"
+        c.VK_KHR_XCB_SURFACE_EXTENSION_NAME
     else
         unreachable,
 };
 const device_extension_enable = [_][*c]const u8{
-    "VK_KHR_swapchain",
+    c.VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 };
 const dynamic_state: [2]c.VkDynamicState align(4) = .{
     c.VK_DYNAMIC_STATE_VIEWPORT,
@@ -116,7 +116,7 @@ fn errCheckAllowIncomplete(result: c.VkResult) !void {
     return errCheck(result);
 }
 
-pub const VulkanGfx = struct {
+pub const Vulkan = struct {
     instance_version: u32 = int_invalid,
     instance_extension_count: u32 = instance_extension_count_max,
     instance_extension: [instance_extension_count_max]c.VkExtensionProperties = undefined,
@@ -152,7 +152,7 @@ pub const VulkanGfx = struct {
         surface_present_mode_count_max,
         c.VK_PRESENT_MODE_MAX_ENUM_KHR,
     ),
-    surface_present_mode_index_fifo: usize = int_invalid,
+    surface_present_mode_index_vsync: usize = int_invalid,
     swapchain: c.VkSwapchainKHR = null,
     swapchain_image_count: u32 = swapchain_image_count_max,
     swapchain_image: [swapchain_image_count_max]c.VkImage = initArray(
@@ -213,8 +213,9 @@ pub const VulkanGfx = struct {
     fence_index_in_flight: u32 = 0,
     frame_index_draw: usize = 0,
 
-    pub fn kill(self: VulkanGfx) void {
-        self.killSwapchain();
+    pub fn kill(self: Vulkan) void {
+        _ = c.vkDeviceWaitIdle(self.device);
+        self.swapchainKill();
         for (0..frame_concurrency) |frame_concurrency_index| {
             for (0..fence_count) |index| {
                 c.vkDestroyFence(self.device, self.fence[frame_concurrency_index][index], null);
@@ -235,7 +236,7 @@ pub const VulkanGfx = struct {
         c.vkDestroyInstance(self.instance, null);
     }
 
-    fn killSwapchain(self: VulkanGfx) void {
+    fn swapchainKill(self: Vulkan) void {
         for (0..self.swapchain_image_count) |index| {
             c.vkDestroyFramebuffer(self.device, self.framebuffer[index], null);
             c.vkDestroyImageView(self.device, self.swapchain_image_view[index], null);
@@ -243,26 +244,255 @@ pub const VulkanGfx = struct {
         c.vkDestroySwapchainKHR(self.device, self.swapchain, null);
     }
 
-    fn initSwapchain(self: *VulkanGfx) !void {
+    pub fn swapchainInit(self: *Vulkan) !void {
         try errCheck(c.vkDeviceWaitIdle(self.device));
 
-        // TODO: create new swapchain from old swapchain instead when possible
-        self.killSwapchain();
+        std.debug.print("\nCreating Swapchain\n", .{});
 
-        //createSwapchain
+        // TODO: create new swapchain from old swapchain instead when possible
+        self.swapchainKill();
+
+        // create swapchain
+        {
+            // surface capabilities
+            {
+                try errCheck(c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+                    self.physical_device[self.physical_device_index_gpu],
+                    self.surface,
+                    &self.surface_capabilities,
+                ));
+
+                const caps = self.surface_capabilities;
+                std.debug.print("\nAvailable Surface Capabilities\n  - currentExtent:({},{})\n  - minImageExtent:({},{})\n  - maxImageExtent:({},{})\n  - imageCount:[{},{}]\n", .{
+                    caps.currentExtent.width,
+                    caps.currentExtent.height,
+                    caps.minImageExtent.width,
+                    caps.minImageExtent.height,
+                    caps.maxImageExtent.width,
+                    caps.maxImageExtent.height,
+                    caps.minImageCount,
+                    caps.maxImageCount,
+                });
+            }
+
+            // surface formats
+            {
+                try errCheckAllowIncomplete(c.vkGetPhysicalDeviceSurfaceFormatsKHR(
+                    self.physical_device[self.physical_device_index_gpu],
+                    self.surface,
+                    &self.surface_format_count,
+                    &self.surface_format,
+                ));
+                std.debug.assert(self.surface_format_count != 0);
+
+                for (0..self.surface_format_count) |index| {
+                    const surface_format = self.surface_format[index];
+                    if (surface_format.format == c.VK_FORMAT_B8G8R8A8_SRGB and
+                        surface_format.colorSpace == c.VK_COLORSPACE_SRGB_NONLINEAR_KHR)
+                    {
+                        self.surface_format_index_bgra_srgb = index;
+                        break;
+                    }
+                }
+                std.debug.assert(self.surface_format_index_bgra_srgb != int_invalid);
+
+                std.debug.print("\nAvailable Surface Formats: ({})\n", .{self.surface_format_count});
+                for (0..self.surface_format_count) |index| {
+                    const surface_format = self.surface_format[index];
+                    std.debug.print("  - format:{}, colorSpace:{}{s}\n", .{
+                        surface_format.format,
+                        surface_format.colorSpace,
+                        if (index == self.surface_format_index_bgra_srgb) " [Selected]" else "",
+                    });
+                }
+            }
+
+            // present modes
+            {
+                try errCheckAllowIncomplete(c.vkGetPhysicalDeviceSurfacePresentModesKHR(
+                    self.physical_device[self.physical_device_index_gpu],
+                    self.surface,
+                    &self.surface_present_mode_count,
+                    &self.surface_present_mode,
+                ));
+                std.debug.assert(self.surface_present_mode_count != 0);
+
+                for (0..self.surface_present_mode_count) |index| {
+                    std.debug.assert(self.surface_present_mode[index] != c.VK_PRESENT_MODE_MAX_ENUM_KHR);
+                }
+
+                for (0..self.surface_present_mode_count) |index| {
+                    const present_mode = self.surface_present_mode[index];
+                    if (present_mode == c.VK_PRESENT_MODE_MAILBOX_KHR) {
+                        self.surface_present_mode_index_vsync = index;
+                        break;
+                    }
+                }
+                if (self.surface_present_mode_index_vsync == int_invalid) {
+                    for (0..self.surface_present_mode_count) |index| {
+                        const present_mode = self.surface_present_mode[index];
+                        if (present_mode == c.VK_PRESENT_MODE_FIFO_KHR) {
+                            self.surface_present_mode_index_vsync = index;
+                            break;
+                        }
+                    }
+                }
+                std.debug.assert(self.surface_present_mode_index_vsync != int_invalid);
+
+                std.debug.print("\nAvailable Surface Present Modes: ({})\n", .{self.surface_present_mode_count});
+                for (0..self.surface_present_mode_count) |index| {
+                    const present_mode = self.surface_present_mode[index];
+                    std.debug.print("  - {s}{s}\n", .{
+                        switch (present_mode) {
+                            c.VK_PRESENT_MODE_IMMEDIATE_KHR => "Immediate",
+                            c.VK_PRESENT_MODE_MAILBOX_KHR => "Mailbox",
+                            c.VK_PRESENT_MODE_FIFO_KHR => "FIFO",
+                            c.VK_PRESENT_MODE_FIFO_RELAXED_KHR => "FIFO Relaxed",
+                            c.VK_PRESENT_MODE_SHARED_DEMAND_REFRESH_KHR => "Shared Demand Refresh",
+                            c.VK_PRESENT_MODE_SHARED_CONTINUOUS_REFRESH_KHR => "Shared Continuous Refresh",
+                            else => "Unknown",
+                        },
+                        if (index == self.surface_present_mode_index_vsync) " [Selected]" else "",
+                    });
+                }
+            }
+
+            // maxImageCount=0 means no max
+            const image_count = if (self.surface_capabilities.maxImageCount > 0 and
+                self.surface_capabilities.minImageCount + 1 > self.surface_capabilities.maxImageCount)
+                self.surface_capabilities.maxImageCount
+            else
+                // NOTE: +1 avoids stalling on driver to complete internal operations before we can acquire a new image to render to
+                self.surface_capabilities.minImageCount + 1;
+            std.debug.assert(image_count != 0);
+            std.debug.print("\nSwapchain Image Count: {}\n", .{image_count});
+
+            {
+                const surface_format = self.surface_format[self.surface_format_index_bgra_srgb];
+                const swapchain_create_info = c.VkSwapchainCreateInfoKHR{
+                    .sType = c.VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+                    .pNext = null,
+                    .flags = 0,
+                    .surface = self.surface,
+                    .minImageCount = image_count,
+                    .imageFormat = surface_format.format,
+                    .imageColorSpace = surface_format.colorSpace,
+                    .imageExtent = self.surface_capabilities.currentExtent,
+                    .imageArrayLayers = 1,
+                    // TODO: may want to change this to transfer from compute later
+                    .imageUsage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+
+                    // TODO: change necessary if graphics and presentation are separate queue families
+                    .imageSharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
+                    .queueFamilyIndexCount = 0,
+                    .pQueueFamilyIndices = null,
+
+                    .preTransform = self.surface_capabilities.currentTransform,
+                    .compositeAlpha = c.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+                    .presentMode = self.surface_present_mode[self.surface_present_mode_index_vsync],
+                    .clipped = c.VK_TRUE,
+                    // TODO: recreate swapchain on resize
+                    .oldSwapchain = null,
+                };
+
+                try errCheck(c.vkCreateSwapchainKHR(
+                    self.device,
+                    &swapchain_create_info,
+                    null,
+                    &self.swapchain,
+                ));
+                std.debug.assert(self.swapchain != null);
+            }
+
+            {
+                try errCheck(c.vkGetSwapchainImagesKHR(
+                    self.device,
+                    self.swapchain,
+                    &self.swapchain_image_count,
+                    &self.swapchain_image,
+                ));
+                std.debug.assert(self.swapchain_image_count == image_count);
+                for (0..self.swapchain_image_count) |index| {
+                    std.debug.assert(self.swapchain_image[index] != null);
+                }
+            }
+        }
+
         //createImageViews
+        {
+            for (0..self.swapchain_image_count) |index| {
+                const image_view_create_info = c.VkImageViewCreateInfo{
+                    .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                    .pNext = null,
+                    .flags = 0,
+                    .image = self.swapchain_image[index],
+                    .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
+                    .format = self.surface_format[self.surface_format_index_bgra_srgb].format,
+                    .components = c.VkComponentMapping{
+                        .r = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                        .g = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                        .b = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                        .a = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                    },
+                    .subresourceRange = c.VkImageSubresourceRange{
+                        .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                        .baseMipLevel = 0,
+                        .levelCount = 1,
+                        .baseArrayLayer = 0,
+                        .layerCount = 1,
+                    },
+                };
+
+                try errCheck(c.vkCreateImageView(
+                    self.device,
+                    &image_view_create_info,
+                    null,
+                    &self.swapchain_image_view[index],
+                ));
+                std.debug.assert(self.swapchain_image_view[index] != null);
+            }
+        }
+
         //createFramebuffers
+        {
+            for (0..self.swapchain_image_count) |index| {
+                const image_view_attachments = [_]c.VkImageView{
+                    self.swapchain_image_view[index],
+                };
+
+                const extent = self.surface_capabilities.currentExtent;
+                const framebuffer_create_info = c.VkFramebufferCreateInfo{
+                    .sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+                    .pNext = null,
+                    .flags = 0,
+                    .renderPass = self.render_pass,
+                    .attachmentCount = image_view_attachments.len,
+                    .pAttachments = &image_view_attachments,
+                    .width = extent.width,
+                    .height = extent.height,
+                    .layers = 1,
+                };
+
+                try errCheck(c.vkCreateFramebuffer(
+                    self.device,
+                    &framebuffer_create_info,
+                    null,
+                    &self.framebuffer[index],
+                ));
+                std.debug.assert(self.framebuffer[index] != null);
+            }
+        }
     }
 
-    pub fn drawFrame(self: *VulkanGfx) !void {
-        // wait
-        try errCheck(c.vkWaitForFences(
-            self.device,
-            1,
-            &self.fence[self.frame_index_draw][self.fence_index_in_flight],
-            c.VK_TRUE,
-            timeout_half_second,
-        ));
+    pub fn frameDraw(self: *Vulkan) !void {
+        // poll readiness
+        {
+            const fence_status = c.vkGetFenceStatus(self.device, self.fence[self.frame_index_draw][self.fence_index_in_flight]);
+            if (fence_status == c.VK_NOT_READY) {
+                return;
+            }
+            try errCheck(fence_status);
+        }
 
         // swapchain image index
         var swapchain_image_index_draw: u32 = int_invalid;
@@ -278,7 +508,7 @@ pub const VulkanGfx = struct {
 
             switch (result) {
                 c.VK_ERROR_OUT_OF_DATE_KHR => {
-                    try self.initSwapchain();
+                    try self.swapchainInit();
                     return;
                 },
                 c.VK_SUBOPTIMAL_KHR => {},
@@ -421,8 +651,8 @@ pub const VulkanGfx = struct {
             const result = c.vkQueuePresentKHR(queue, &present_info);
 
             switch (result) {
-                c.VK_ERROR_OUT_OF_DATE_KHR => try self.initSwapchain(),
-                c.VK_SUBOPTIMAL_KHR => try self.initSwapchain(),
+                c.VK_ERROR_OUT_OF_DATE_KHR => try self.swapchainInit(),
+                c.VK_SUBOPTIMAL_KHR => try self.swapchainInit(),
                 else => try errCheck(result),
             }
         }
@@ -430,7 +660,7 @@ pub const VulkanGfx = struct {
         self.frame_index_draw = (self.frame_index_draw + 1) & frame_concurrency;
     }
 
-    pub fn init(self: *VulkanGfx, ui: xcb.XcbUi) !void {
+    pub fn init(self: *Vulkan, ui: xcb.XcbUi) !void {
         std.debug.print("\n=== Vulkan ===\n", .{});
 
         // instance
@@ -699,196 +929,12 @@ pub const VulkanGfx = struct {
                 ));
                 std.debug.assert(support_present != c.VK_FALSE);
             }
-
-            {
-                try errCheck(c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
-                    self.physical_device[self.physical_device_index_gpu],
-                    self.surface,
-                    &self.surface_capabilities,
-                ));
-
-                const caps = self.surface_capabilities;
-                std.debug.print("\nAvailable Surface Capabilities\n  - currentExtent:({},{})\n  - minImageExtent:({},{})\n  - maxImageExtent:({},{})\n  - imageCount:[{},{}]\n", .{
-                    caps.currentExtent.width,
-                    caps.currentExtent.height,
-                    caps.minImageExtent.width,
-                    caps.minImageExtent.height,
-                    caps.maxImageExtent.width,
-                    caps.maxImageExtent.height,
-                    caps.minImageCount,
-                    caps.maxImageCount,
-                });
-            }
-
-            {
-                try errCheckAllowIncomplete(c.vkGetPhysicalDeviceSurfaceFormatsKHR(
-                    self.physical_device[self.physical_device_index_gpu],
-                    self.surface,
-                    &self.surface_format_count,
-                    &self.surface_format,
-                ));
-                std.debug.assert(self.surface_format_count != 0);
-
-                for (0..self.surface_format_count) |index| {
-                    const surface_format = self.surface_format[index];
-                    if (surface_format.format == c.VK_FORMAT_B8G8R8A8_SRGB and
-                        surface_format.colorSpace == c.VK_COLORSPACE_SRGB_NONLINEAR_KHR)
-                    {
-                        self.surface_format_index_bgra_srgb = index;
-                        break;
-                    }
-                }
-                std.debug.assert(self.surface_format_index_bgra_srgb != int_invalid);
-
-                std.debug.print("\nAvailable Surface Formats: ({})\n", .{self.surface_format_count});
-                for (0..self.surface_format_count) |index| {
-                    const surface_format = self.surface_format[index];
-                    std.debug.print("  - format:{}, colorSpace:{}{s}\n", .{
-                        surface_format.format,
-                        surface_format.colorSpace,
-                        if (index == self.surface_format_index_bgra_srgb) " [Selected]" else "",
-                    });
-                }
-            }
-
-            {
-                try errCheckAllowIncomplete(c.vkGetPhysicalDeviceSurfacePresentModesKHR(
-                    self.physical_device[self.physical_device_index_gpu],
-                    self.surface,
-                    &self.surface_present_mode_count,
-                    &self.surface_present_mode,
-                ));
-                std.debug.assert(self.surface_present_mode_count != 0);
-
-                for (0..self.surface_present_mode_count) |index| {
-                    std.debug.assert(self.surface_present_mode[index] != c.VK_PRESENT_MODE_MAX_ENUM_KHR);
-                }
-
-                for (0..self.surface_present_mode_count) |index| {
-                    const present_mode = self.surface_present_mode[index];
-                    if (present_mode == c.VK_PRESENT_MODE_FIFO_KHR) {
-                        self.surface_present_mode_index_fifo = index;
-                        break;
-                    }
-                }
-                std.debug.assert(self.surface_present_mode_index_fifo != int_invalid);
-
-                std.debug.print("\nAvailable Surface Present Modes: ({})\n", .{self.surface_present_mode_count});
-                for (0..self.surface_present_mode_count) |index| {
-                    const present_mode = self.surface_present_mode[index];
-                    std.debug.print("  - {s}{s}\n", .{
-                        switch (present_mode) {
-                            c.VK_PRESENT_MODE_IMMEDIATE_KHR => "Immediate",
-                            c.VK_PRESENT_MODE_MAILBOX_KHR => "Mailbox",
-                            c.VK_PRESENT_MODE_FIFO_KHR => "FIFO",
-                            c.VK_PRESENT_MODE_FIFO_RELAXED_KHR => "FIFO Relaxed",
-                            c.VK_PRESENT_MODE_SHARED_DEMAND_REFRESH_KHR => "Shared Demand Refresh",
-                            c.VK_PRESENT_MODE_SHARED_CONTINUOUS_REFRESH_KHR => "Shared Continuous Refresh",
-                            else => "Unknown",
-                        },
-                        if (index == self.surface_present_mode_index_fifo) " [Selected]" else "",
-                    });
-                }
-            }
         }
+
+        try self.swapchainInit();
 
         // swapchain
         // TODO: consider hi-DPI support
-        {
-            // maxImageCount=0 means no max
-            const image_count = if (self.surface_capabilities.maxImageCount > 0 and
-                self.surface_capabilities.minImageCount + 1 > self.surface_capabilities.maxImageCount)
-                self.surface_capabilities.maxImageCount
-            else
-                // NOTE: +1 avoids stalling on driver to complete internal operations before we can acquire a new image to render to
-                self.surface_capabilities.minImageCount + 1;
-            std.debug.assert(image_count != 0);
-            std.debug.print("\nSwapchain Image Count: {}\n", .{image_count});
-
-            {
-                const surface_format = self.surface_format[self.surface_format_index_bgra_srgb];
-                const swapchain_create_info = c.VkSwapchainCreateInfoKHR{
-                    .sType = c.VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-                    .pNext = null,
-                    .flags = 0,
-                    .surface = self.surface,
-                    .minImageCount = image_count,
-                    .imageFormat = surface_format.format,
-                    .imageColorSpace = surface_format.colorSpace,
-                    .imageExtent = self.surface_capabilities.currentExtent,
-                    .imageArrayLayers = 1,
-                    // TODO: may want to change this to transfer from compute later
-                    .imageUsage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-
-                    // TODO: change necessary if graphics and presentation are separate queue families
-                    .imageSharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
-                    .queueFamilyIndexCount = 0,
-                    .pQueueFamilyIndices = null,
-
-                    .preTransform = self.surface_capabilities.currentTransform,
-                    .compositeAlpha = c.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-                    .presentMode = self.surface_present_mode[self.surface_present_mode_index_fifo],
-                    .clipped = c.VK_TRUE,
-                    // TODO: recreate swapchain on resize
-                    .oldSwapchain = null,
-                };
-
-                try errCheck(c.vkCreateSwapchainKHR(
-                    self.device,
-                    &swapchain_create_info,
-                    null,
-                    &self.swapchain,
-                ));
-                std.debug.assert(self.swapchain != null);
-            }
-
-            {
-                try errCheck(c.vkGetSwapchainImagesKHR(
-                    self.device,
-                    self.swapchain,
-                    &self.swapchain_image_count,
-                    &self.swapchain_image,
-                ));
-                std.debug.assert(self.swapchain_image_count == image_count);
-                for (0..self.swapchain_image_count) |index| {
-                    std.debug.assert(self.swapchain_image[index] != null);
-                }
-            }
-
-            {
-                for (0..self.swapchain_image_count) |index| {
-                    const image_view_create_info = c.VkImageViewCreateInfo{
-                        .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-                        .pNext = null,
-                        .flags = 0,
-                        .image = self.swapchain_image[index],
-                        .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
-                        .format = self.surface_format[self.surface_format_index_bgra_srgb].format,
-                        .components = c.VkComponentMapping{
-                            .r = c.VK_COMPONENT_SWIZZLE_IDENTITY,
-                            .g = c.VK_COMPONENT_SWIZZLE_IDENTITY,
-                            .b = c.VK_COMPONENT_SWIZZLE_IDENTITY,
-                            .a = c.VK_COMPONENT_SWIZZLE_IDENTITY,
-                        },
-                        .subresourceRange = c.VkImageSubresourceRange{
-                            .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
-                            .baseMipLevel = 0,
-                            .levelCount = 1,
-                            .baseArrayLayer = 0,
-                            .layerCount = 1,
-                        },
-                    };
-
-                    try errCheck(c.vkCreateImageView(
-                        self.device,
-                        &image_view_create_info,
-                        null,
-                        &self.swapchain_image_view[index],
-                    ));
-                    std.debug.assert(self.swapchain_image_view[index] != null);
-                }
-            }
-        }
 
         // shaders
         {
@@ -1147,36 +1193,6 @@ pub const VulkanGfx = struct {
                     &self.pipeline_graphics,
                 ));
                 std.debug.assert(self.pipeline_graphics != null);
-            }
-        }
-
-        // framebuffer
-        {
-            for (0..self.swapchain_image_count) |index| {
-                const image_view_attachments = [_]c.VkImageView{
-                    self.swapchain_image_view[index],
-                };
-
-                const extent = self.surface_capabilities.currentExtent;
-                const framebuffer_create_info = c.VkFramebufferCreateInfo{
-                    .sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-                    .pNext = null,
-                    .flags = 0,
-                    .renderPass = self.render_pass,
-                    .attachmentCount = image_view_attachments.len,
-                    .pAttachments = &image_view_attachments,
-                    .width = extent.width,
-                    .height = extent.height,
-                    .layers = 1,
-                };
-
-                try errCheck(c.vkCreateFramebuffer(
-                    self.device,
-                    &framebuffer_create_info,
-                    null,
-                    &self.framebuffer[index],
-                ));
-                std.debug.assert(self.framebuffer[index] != null);
             }
         }
 

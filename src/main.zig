@@ -38,7 +38,7 @@ pub fn main() !void {
                             },
                         },
                         .alt = .{
-                            .wm = .{ .event = .delete_window },
+                            .wm = .{ .event = .delete },
                         },
                     },
                 },
@@ -54,10 +54,11 @@ pub fn main() !void {
         }
     };
 
-    var ui = try xcb.init();
+    var ui = xcb.XcbUi{};
+    try ui.init();
     defer ui.kill();
 
-    var gpu = vk.VulkanGfx{};
+    var gpu = vk.Vulkan{};
     try gpu.init(ui);
     defer gpu.kill();
 
@@ -73,16 +74,22 @@ pub fn main() !void {
     std.debug.print("\n=== Start ===\n", .{});
 
     while (should_run) {
-        ui.consume_events(&input);
+        ui.frameConsume(&input);
 
         if (bindings.main.exit.check(input)) {
             should_run = false;
             break;
         }
 
-        try gpu.drawFrame();
+        if ((input.wm.flags & @intFromEnum(inp.Input.Wm.Event.resize)) != 0) {
+            try gpu.swapchainInit();
+        }
+
+        try gpu.frameDraw();
 
         try sound.update();
+
+        input.frameConsume();
     }
 
     std.debug.print("exited cleanly\n", .{});
