@@ -80,7 +80,7 @@ pub fn main() !void {
             break;
         }
 
-        gpu.update();
+        try gpu.drawFrame();
 
         try sound.update();
     }

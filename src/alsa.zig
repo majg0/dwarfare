@@ -155,7 +155,7 @@ pub fn init() !AlsaAudio {
     const pcm_name = "default";
 
     var sample_rate: u32 = 44100; // CD quality audio; 2*2*3*3*5*5*7*7
-    const frames_per_second = 525; // = 3*5*5*7
+    const frames_per_second = 9; // 3*3
     var frame_size: c.snd_pcm_uframes_t = sample_rate / frames_per_second;
     var period_size: c.snd_pcm_uframes_t = 0;
     var buffer_size: u32 = 0;

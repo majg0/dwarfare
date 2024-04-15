@@ -43,6 +43,10 @@ const surface_present_mode_count_max = 8;
 const swapchain_image_count_max = 8;
 const shader_size_max = 2048;
 const shader_count = 2;
+const semaphore_count = 2;
+const timeout_half_second = 500e6;
+const frame_concurrency = 2;
+const fence_count = 1;
 
 fn initArray(comptime T: type, comptime size: usize, comptime value: T) [size]T {
     var array: [size]T = undefined;
@@ -52,18 +56,64 @@ fn initArray(comptime T: type, comptime size: usize, comptime value: T) [size]T 
     return array;
 }
 
-fn err_check(result: c.VkResult) !void {
-    if (result != c.VK_SUCCESS and result != c.VK_INCOMPLETE) {
-        std.debug.print("vk error code {}\n", .{result});
-        return error.VkError;
-    }
+fn errCheck(result: c.VkResult) !void {
+    return switch (result) {
+        c.VK_SUCCESS => {},
+        c.VK_NOT_READY => error.VkNotReady,
+        c.VK_TIMEOUT => error.VkTimeout,
+        c.VK_EVENT_SET => error.VkEventSet,
+        c.VK_EVENT_RESET => error.VkEventReset,
+        c.VK_INCOMPLETE => error.VkIncomplete,
+        c.VK_ERROR_OUT_OF_HOST_MEMORY => error.VkErrorOutOfHostMemory,
+        c.VK_ERROR_OUT_OF_DEVICE_MEMORY => error.VkErrorOutOfDeviceMemory,
+        c.VK_ERROR_INITIALIZATION_FAILED => error.VkErrorInitializationFailed,
+        c.VK_ERROR_DEVICE_LOST => error.VkErrorDeviceLost,
+        c.VK_ERROR_MEMORY_MAP_FAILED => error.VkErrorMemoryMapFailed,
+        c.VK_ERROR_LAYER_NOT_PRESENT => error.VkErrorLayerNotPresent,
+        c.VK_ERROR_EXTENSION_NOT_PRESENT => error.VkErrorExtensionNotPresent,
+        c.VK_ERROR_FEATURE_NOT_PRESENT => error.VkErrorFeatureNotPresent,
+        c.VK_ERROR_INCOMPATIBLE_DRIVER => error.VkErrorIncompatibleDriver,
+        c.VK_ERROR_TOO_MANY_OBJECTS => error.VkErrorTooManyObjects,
+        c.VK_ERROR_FORMAT_NOT_SUPPORTED => error.VkErrorFormatNotSupported,
+        c.VK_ERROR_FRAGMENTED_POOL => error.VkErrorFragmentedPool,
+        c.VK_ERROR_UNKNOWN => error.VkErrorUnknown,
+        c.VK_ERROR_OUT_OF_POOL_MEMORY => error.VkErrorOutOfPoolMemory,
+        c.VK_ERROR_INVALID_EXTERNAL_HANDLE => error.VkErrorInvalidExternalHandle,
+        c.VK_ERROR_FRAGMENTATION => error.VkErrorFragmentation,
+        c.VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS => error.VkErrorInvalidOpaqueCaptureAddress,
+        c.VK_PIPELINE_COMPILE_REQUIRED => error.VkPipelineCompileRequired,
+        c.VK_ERROR_SURFACE_LOST_KHR => error.VkSurfaceLostKhr,
+        c.VK_ERROR_NATIVE_WINDOW_IN_USE_KHR => error.VkErrorNativeWindowInUseKhr,
+        c.VK_SUBOPTIMAL_KHR => error.VkSuboptimalKhr,
+        c.VK_ERROR_OUT_OF_DATE_KHR => error.VkErrorOutOfDateKhr,
+        c.VK_ERROR_INCOMPATIBLE_DISPLAY_KHR => error.VkErrorIncompatibleDisplayKhr,
+        c.VK_ERROR_VALIDATION_FAILED_EXT => error.VkErrorValidationFailedExt,
+        c.VK_ERROR_INVALID_SHADER_NV => error.VkErrorInvalidShaderNv,
+        c.VK_ERROR_IMAGE_USAGE_NOT_SUPPORTED_KHR => error.VkErrorImageUsageNotSupportedKhr,
+        c.VK_ERROR_VIDEO_PICTURE_LAYOUT_NOT_SUPPORTED_KHR => error.VkErrorVideoPictureLayoutNotSupportedKhr,
+        c.VK_ERROR_VIDEO_PROFILE_OPERATION_NOT_SUPPORTED_KHR => error.VkErrorVideoProfileOperationNotSupportedKhr,
+        c.VK_ERROR_VIDEO_PROFILE_FORMAT_NOT_SUPPORTED_KHR => error.VkErrorVideoProfileFormatNotSupportedKhr,
+        c.VK_ERROR_VIDEO_PROFILE_CODEC_NOT_SUPPORTED_KHR => error.VkErrorVideoProfileCodecNotSupportedKhr,
+        c.VK_ERROR_VIDEO_STD_VERSION_NOT_SUPPORTED_KHR => error.VkErrorVideoStdVersionNotSupportedKhr,
+        c.VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT => error.VkErrorInvalidDrmFormatModifierPlaneLayoutExt,
+        c.VK_ERROR_NOT_PERMITTED_KHR => error.VkErrorNotPermittedKhr,
+        c.VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT => error.VkErrorFullScreenExclusiveModeLostExt,
+        c.VK_THREAD_IDLE_KHR => error.VkThreadIdleKhr,
+        c.VK_THREAD_DONE_KHR => error.VkThreadDoneKhr,
+        c.VK_OPERATION_DEFERRED_KHR => error.VkOperationDeferredKhr,
+        c.VK_OPERATION_NOT_DEFERRED_KHR => error.VkOperationNotDeferredKhr,
+        c.VK_ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR => error.VkErrorInvalidVideoStdParametersKhr,
+        c.VK_ERROR_COMPRESSION_EXHAUSTED_EXT => error.VkErrorCompressionExhaustedExt,
+        c.VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT => error.VkErrorIncompatibleShaderBinaryExt,
+        else => error.VkErrorGeneric,
+    };
 }
 
-fn err_check_allow_incomplete(result: c.VkResult) !void {
+fn errCheckAllowIncomplete(result: c.VkResult) !void {
     if (result == c.VK_INCOMPLETE) {
         return;
     }
-    return err_check(result);
+    return errCheck(result);
 }
 
 pub const VulkanGfx = struct {
@@ -74,30 +124,47 @@ pub const VulkanGfx = struct {
     instance_layer: [instance_layer_count_max]c.VkLayerProperties = undefined,
     instance: c.VkInstance = null,
     physical_device_count: u32 = physical_device_count_max,
-    physical_device: [physical_device_count_max]c.VkPhysicalDevice = undefined,
+    physical_device: [physical_device_count_max]c.VkPhysicalDevice = initArray(
+        c.VkPhysicalDevice,
+        physical_device_count_max,
+        null,
+    ),
     physical_device_properties: [physical_device_count_max]c.VkPhysicalDeviceProperties = undefined,
     physical_device_features: [physical_device_count_max]c.VkPhysicalDeviceFeatures = undefined,
     physical_device_index_gpu: usize = int_invalid,
     queue_family_count: u32 = queue_family_count_max,
     queue_family: [queue_family_count_max]c.VkQueueFamilyProperties = undefined,
-    queue_family_index_all: u32 = int_invalid,
+    queue_family_index_graphics: u32 = int_invalid,
     physical_device_group_count: u32 = physical_device_group_count_max,
     physical_device_group: [physical_device_group_count_max]c.VkPhysicalDeviceGroupProperties = undefined,
     device_extension_count: u32 = device_extension_count_max,
     device_extension: [device_extension_count_max]c.VkExtensionProperties = undefined,
     device: c.VkDevice = null,
+    queue_index_graphics: u32 = 0,
     surface: c.VkSurfaceKHR = null,
     surface_capabilities: c.VkSurfaceCapabilitiesKHR = undefined,
     surface_format_count: u32 = surface_format_count_max,
     surface_format: [surface_format_count_max]c.VkSurfaceFormatKHR = undefined,
     surface_format_index_bgra_srgb: usize = int_invalid,
     surface_present_mode_count: u32 = surface_format_count_max,
-    surface_present_mode: [surface_present_mode_count_max]c.VkPresentModeKHR = undefined,
+    surface_present_mode: [surface_present_mode_count_max]c.VkPresentModeKHR = initArray(
+        c.VkPresentModeKHR,
+        surface_present_mode_count_max,
+        c.VK_PRESENT_MODE_MAX_ENUM_KHR,
+    ),
     surface_present_mode_index_fifo: usize = int_invalid,
     swapchain: c.VkSwapchainKHR = null,
     swapchain_image_count: u32 = swapchain_image_count_max,
-    swapchain_image: [swapchain_image_count_max]c.VkImage = undefined,
-    swapchain_image_view: [swapchain_image_count_max]c.VkImageView = undefined,
+    swapchain_image: [swapchain_image_count_max]c.VkImage = initArray(
+        c.VkImage,
+        swapchain_image_count_max,
+        null,
+    ),
+    swapchain_image_view: [swapchain_image_count_max]c.VkImageView = initArray(
+        c.VkImageView,
+        swapchain_image_count_max,
+        null,
+    ),
     shader_name: [shader_count][]const u8 = .{
         "shaders/shader.vert.spv",
         "shaders/shader.frag.spv",
@@ -118,24 +185,250 @@ pub const VulkanGfx = struct {
     pipeline_layout: c.VkPipelineLayout = null,
     render_pass: c.VkRenderPass = null,
     pipeline_graphics: c.VkPipeline = null,
+    framebuffer_count: u32 = swapchain_image_count_max,
+    framebuffer: [swapchain_image_count_max]c.VkFramebuffer = initArray(
+        c.VkFramebuffer,
+        swapchain_image_count_max,
+        null,
+    ),
+    command_pool: c.VkCommandPool = null,
+    command_buffer: [frame_concurrency]c.VkCommandBuffer = initArray(
+        c.VkCommandBuffer,
+        frame_concurrency,
+        null,
+    ),
+    semaphore: [frame_concurrency][semaphore_count]c.VkSemaphore = initArray(
+        [semaphore_count]c.VkSemaphore,
+        frame_concurrency,
+        initArray(c.VkSemaphore, semaphore_count, null),
+    ),
+    // TODO: name these
+    semaphore_index_image_available: usize = 0,
+    semaphore_index_render_finished: usize = 1,
+    fence: [frame_concurrency][fence_count]c.VkFence = initArray(
+        [fence_count]c.VkFence,
+        frame_concurrency,
+        initArray(c.VkFence, fence_count, null),
+    ),
+    fence_index_in_flight: u32 = 0,
+    frame_index_draw: usize = 0,
 
     pub fn kill(self: VulkanGfx) void {
+        self.killSwapchain();
+        for (0..frame_concurrency) |frame_concurrency_index| {
+            for (0..fence_count) |index| {
+                c.vkDestroyFence(self.device, self.fence[frame_concurrency_index][index], null);
+            }
+            for (0..semaphore_count) |index| {
+                c.vkDestroySemaphore(self.device, self.semaphore[frame_concurrency_index][index], null);
+            }
+        }
+        c.vkDestroyCommandPool(self.device, self.command_pool, null);
         c.vkDestroyPipeline(self.device, self.pipeline_graphics, null);
         c.vkDestroyRenderPass(self.device, self.render_pass, null);
         c.vkDestroyPipelineLayout(self.device, self.pipeline_layout, null);
         for (self.shader_module) |shader_module| {
             c.vkDestroyShaderModule(self.device, shader_module, null);
         }
-        for (0..self.swapchain_image_count) |index| {
-            c.vkDestroyImageView(self.device, self.swapchain_image_view[index], null);
-        }
-        c.vkDestroySwapchainKHR(self.device, self.swapchain, null);
         c.vkDestroySurfaceKHR(self.instance, self.surface, null);
         c.vkDestroyDevice(self.device, null);
         c.vkDestroyInstance(self.instance, null);
     }
 
-    pub fn update(_: VulkanGfx) void {}
+    fn killSwapchain(self: VulkanGfx) void {
+        for (0..self.swapchain_image_count) |index| {
+            c.vkDestroyFramebuffer(self.device, self.framebuffer[index], null);
+            c.vkDestroyImageView(self.device, self.swapchain_image_view[index], null);
+        }
+        c.vkDestroySwapchainKHR(self.device, self.swapchain, null);
+    }
+
+    fn initSwapchain(self: *VulkanGfx) !void {
+        try errCheck(c.vkDeviceWaitIdle(self.device));
+
+        // TODO: create new swapchain from old swapchain instead when possible
+        self.killSwapchain();
+
+        //createSwapchain
+        //createImageViews
+        //createFramebuffers
+    }
+
+    pub fn drawFrame(self: *VulkanGfx) !void {
+        // wait
+        try errCheck(c.vkWaitForFences(
+            self.device,
+            1,
+            &self.fence[self.frame_index_draw][self.fence_index_in_flight],
+            c.VK_TRUE,
+            timeout_half_second,
+        ));
+
+        // swapchain image index
+        var swapchain_image_index_draw: u32 = int_invalid;
+        {
+            const result = c.vkAcquireNextImageKHR(
+                self.device,
+                self.swapchain,
+                timeout_half_second,
+                self.semaphore[self.frame_index_draw][self.semaphore_index_image_available],
+                null,
+                &swapchain_image_index_draw,
+            );
+
+            switch (result) {
+                c.VK_ERROR_OUT_OF_DATE_KHR => {
+                    try self.initSwapchain();
+                    return;
+                },
+                c.VK_SUBOPTIMAL_KHR => {},
+                else => {
+                    try errCheck(result);
+                },
+            }
+
+            std.debug.assert(swapchain_image_index_draw != int_invalid);
+        }
+
+        // NOTE: reset fence once we know we will perform work
+        try errCheck(c.vkResetFences(
+            self.device,
+            1,
+            &self.fence[self.frame_index_draw][self.fence_index_in_flight],
+        ));
+
+        // queue
+        var queue: c.VkQueue = null;
+        {
+            c.vkGetDeviceQueue(
+                self.device,
+                self.queue_family_index_graphics,
+                self.queue_index_graphics,
+                &queue,
+            );
+            std.debug.assert(queue != null);
+        }
+
+        try errCheck(c.vkResetCommandBuffer(self.command_buffer[self.frame_index_draw], 0));
+
+        // command render pass
+        {
+            {
+                const command_buffer_begin_info = c.VkCommandBufferBeginInfo{
+                    .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                    .pNext = null,
+                    .flags = 0,
+                    .pInheritanceInfo = null,
+                };
+                try errCheck(c.vkBeginCommandBuffer(
+                    self.command_buffer[self.frame_index_draw],
+                    &command_buffer_begin_info,
+                ));
+            }
+
+            {
+                const clear_value = c.VkClearValue{
+                    .color = .{
+                        .float32 = .{ 0, 0, 0, 1 },
+                    },
+                };
+                const render_pass_begin_info = c.VkRenderPassBeginInfo{
+                    .sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+                    .pNext = null,
+                    .renderPass = self.render_pass,
+                    .framebuffer = self.framebuffer[swapchain_image_index_draw],
+                    .renderArea = .{
+                        .offset = .{ .x = 0, .y = 0 },
+                        .extent = self.surface_capabilities.currentExtent,
+                    },
+                    .clearValueCount = 1,
+                    .pClearValues = &clear_value,
+                };
+                c.vkCmdBeginRenderPass(
+                    self.command_buffer[self.frame_index_draw],
+                    &render_pass_begin_info,
+                    c.VK_SUBPASS_CONTENTS_INLINE,
+                );
+            }
+
+            c.vkCmdBindPipeline(
+                self.command_buffer[self.frame_index_draw],
+                c.VK_PIPELINE_BIND_POINT_GRAPHICS,
+                self.pipeline_graphics,
+            );
+
+            {
+                const viewport = c.VkViewport{
+                    .x = 0,
+                    .y = 0,
+                    .width = @floatFromInt(self.surface_capabilities.currentExtent.width),
+                    .height = @floatFromInt(self.surface_capabilities.currentExtent.height),
+                    .minDepth = 0,
+                    .maxDepth = 1,
+                };
+                c.vkCmdSetViewport(self.command_buffer[self.frame_index_draw], 0, 1, &viewport);
+            }
+
+            {
+                const scissor = c.VkRect2D{
+                    .offset = c.VkOffset2D{ .x = 0, .y = 0 },
+                    .extent = self.surface_capabilities.currentExtent,
+                };
+                c.vkCmdSetScissor(self.command_buffer[self.frame_index_draw], 0, 1, &scissor);
+            }
+
+            c.vkCmdDraw(self.command_buffer[self.frame_index_draw], 3, 1, 0, 0);
+
+            c.vkCmdEndRenderPass(self.command_buffer[self.frame_index_draw]);
+
+            try errCheck(c.vkEndCommandBuffer(self.command_buffer[self.frame_index_draw]));
+        }
+
+        {
+            const submit_info = c.VkSubmitInfo{
+                .sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                .pNext = null,
+                .waitSemaphoreCount = 1,
+                .pWaitSemaphores = &self.semaphore[self.frame_index_draw][self.semaphore_index_image_available],
+                .pWaitDstStageMask = &@as(u32, c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT),
+                .commandBufferCount = 1,
+                .pCommandBuffers = &self.command_buffer,
+                .signalSemaphoreCount = 1,
+                .pSignalSemaphores = &self.semaphore[self.frame_index_draw][self.semaphore_index_render_finished],
+            };
+
+            try errCheck(c.vkQueueSubmit(
+                queue,
+                1,
+                &submit_info,
+                self.fence[self.frame_index_draw][self.fence_index_in_flight],
+            ));
+        }
+
+        // presentation
+        {
+            const present_info = c.VkPresentInfoKHR{
+                .sType = c.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+                .pNext = null,
+                .waitSemaphoreCount = 1,
+                .pWaitSemaphores = &self.semaphore[self.frame_index_draw][self.semaphore_index_render_finished],
+                .swapchainCount = 1,
+                .pSwapchains = &self.swapchain,
+                .pImageIndices = &swapchain_image_index_draw,
+                .pResults = null,
+            };
+
+            const result = c.vkQueuePresentKHR(queue, &present_info);
+
+            switch (result) {
+                c.VK_ERROR_OUT_OF_DATE_KHR => try self.initSwapchain(),
+                c.VK_SUBOPTIMAL_KHR => try self.initSwapchain(),
+                else => try errCheck(result),
+            }
+        }
+
+        self.frame_index_draw = (self.frame_index_draw + 1) & frame_concurrency;
+    }
 
     pub fn init(self: *VulkanGfx, ui: xcb.XcbUi) !void {
         std.debug.print("\n=== Vulkan ===\n", .{});
@@ -146,7 +439,7 @@ pub const VulkanGfx = struct {
         {
             // instance version
             {
-                try err_check(c.vkEnumerateInstanceVersion(&self.instance_version));
+                try errCheck(c.vkEnumerateInstanceVersion(&self.instance_version));
                 std.debug.assert(self.instance_version != int_invalid);
 
                 std.debug.print("\nSupported API Version: {}.{}.{}\n", .{
@@ -158,7 +451,7 @@ pub const VulkanGfx = struct {
 
             // instance extensions
             {
-                try err_check_allow_incomplete(c.vkEnumerateInstanceExtensionProperties(
+                try errCheckAllowIncomplete(c.vkEnumerateInstanceExtensionProperties(
                     null,
                     &self.instance_extension_count,
                     &self.instance_extension,
@@ -177,7 +470,7 @@ pub const VulkanGfx = struct {
 
             // instance layers
             {
-                try err_check_allow_incomplete(c.vkEnumerateInstanceLayerProperties(
+                try errCheckAllowIncomplete(c.vkEnumerateInstanceLayerProperties(
                     &self.instance_layer_count,
                     &self.instance_layer,
                 ));
@@ -214,7 +507,7 @@ pub const VulkanGfx = struct {
                     .ppEnabledExtensionNames = &instance_extension_enable,
                 };
 
-                try err_check(c.vkCreateInstance(&instance_create_info, null, &self.instance));
+                try errCheck(c.vkCreateInstance(&instance_create_info, null, &self.instance));
                 std.debug.assert(self.instance != null);
             }
         }
@@ -223,12 +516,16 @@ pub const VulkanGfx = struct {
         // DOCS: https://docs.vulkan.org/spec/latest/chapters/devsandqueues.html#devsandqueues-physical-device-enumeration
 
         {
-            try err_check_allow_incomplete(c.vkEnumeratePhysicalDevices(
+            try errCheckAllowIncomplete(c.vkEnumeratePhysicalDevices(
                 self.instance,
                 &self.physical_device_count,
                 &self.physical_device,
             ));
             std.debug.assert(self.physical_device_count != 0);
+
+            for (0..self.physical_device_count) |index| {
+                std.debug.assert(self.physical_device[index] != null);
+            }
 
             // fill
             for (0..self.physical_device_count) |index| {
@@ -280,11 +577,11 @@ pub const VulkanGfx = struct {
                 const queue_family = self.queue_family[index];
                 const mask = c.VK_QUEUE_GRAPHICS_BIT | c.VK_QUEUE_COMPUTE_BIT | c.VK_QUEUE_TRANSFER_BIT;
                 if ((queue_family.queueFlags & mask) != 0) {
-                    self.queue_family_index_all = @intCast(index);
+                    self.queue_family_index_graphics = @intCast(index);
                     break;
                 }
             }
-            std.debug.assert(self.queue_family_index_all != int_invalid);
+            std.debug.assert(self.queue_family_index_graphics != int_invalid);
 
             // print
             std.debug.print("\nAvailable Queue Families ({})\n", .{self.queue_family_count});
@@ -292,14 +589,14 @@ pub const VulkanGfx = struct {
                 const queue_family = self.queue_family[index];
                 std.debug.print("  - {b:9}{s}\n", .{
                     queue_family.queueFlags,
-                    if (index == self.queue_family_index_all) " [Selected]" else "",
+                    if (index == self.queue_family_index_graphics) " [Selected]" else "",
                 });
             }
         }
 
         // NOTE: They're all size:1 on my computer, so I can't really test this out
         {
-            try err_check_allow_incomplete(c.vkEnumeratePhysicalDeviceGroups(
+            try errCheckAllowIncomplete(c.vkEnumeratePhysicalDeviceGroups(
                 self.instance,
                 &self.physical_device_group_count,
                 &self.physical_device_group,
@@ -316,12 +613,10 @@ pub const VulkanGfx = struct {
         // device
         // DOCS: https://docs.vulkan.org/spec/latest/chapters/devsandqueues.html#devsandqueues-devices
 
-        var queue: c.VkQueue = null;
-        const device_queue_index = 0;
         {
             // device extensions
             {
-                try err_check_allow_incomplete(c.vkEnumerateDeviceExtensionProperties(
+                try errCheckAllowIncomplete(c.vkEnumerateDeviceExtensionProperties(
                     self.physical_device[self.physical_device_index_gpu],
                     null,
                     &self.device_extension_count,
@@ -346,7 +641,7 @@ pub const VulkanGfx = struct {
                     .sType = c.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
                     .pNext = null,
                     .flags = 0,
-                    .queueFamilyIndex = self.queue_family_index_all,
+                    .queueFamilyIndex = self.queue_family_index_graphics,
                     .queueCount = 1,
                     .pQueuePriorities = &@as(f32, 1.0),
                 };
@@ -364,7 +659,7 @@ pub const VulkanGfx = struct {
                     .pEnabledFeatures = null,
                 };
 
-                try err_check(c.vkCreateDevice(
+                try errCheck(c.vkCreateDevice(
                     self.physical_device[self.physical_device_index_gpu],
                     &device_create_info,
                     null,
@@ -372,17 +667,6 @@ pub const VulkanGfx = struct {
                 ));
                 std.debug.assert(self.device != null);
             }
-        }
-
-        // queue
-        {
-            c.vkGetDeviceQueue(
-                self.device,
-                self.queue_family_index_all,
-                device_queue_index,
-                &queue,
-            );
-            std.debug.assert(queue != null);
         }
 
         // surface
@@ -396,7 +680,7 @@ pub const VulkanGfx = struct {
                     .window = ui.window,
                 };
 
-                try err_check(c.vkCreateXcbSurfaceKHR(
+                try errCheck(c.vkCreateXcbSurfaceKHR(
                     self.instance,
                     &surface_create_info,
                     null,
@@ -407,9 +691,9 @@ pub const VulkanGfx = struct {
 
             {
                 var support_present = c.VK_FALSE;
-                try err_check(c.vkGetPhysicalDeviceSurfaceSupportKHR(
+                try errCheck(c.vkGetPhysicalDeviceSurfaceSupportKHR(
                     self.physical_device[self.physical_device_index_gpu],
-                    self.queue_family_index_all,
+                    self.queue_family_index_graphics,
                     self.surface,
                     &support_present,
                 ));
@@ -417,7 +701,7 @@ pub const VulkanGfx = struct {
             }
 
             {
-                try err_check(c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+                try errCheck(c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
                     self.physical_device[self.physical_device_index_gpu],
                     self.surface,
                     &self.surface_capabilities,
@@ -437,7 +721,7 @@ pub const VulkanGfx = struct {
             }
 
             {
-                try err_check_allow_incomplete(c.vkGetPhysicalDeviceSurfaceFormatsKHR(
+                try errCheckAllowIncomplete(c.vkGetPhysicalDeviceSurfaceFormatsKHR(
                     self.physical_device[self.physical_device_index_gpu],
                     self.surface,
                     &self.surface_format_count,
@@ -468,13 +752,17 @@ pub const VulkanGfx = struct {
             }
 
             {
-                try err_check_allow_incomplete(c.vkGetPhysicalDeviceSurfacePresentModesKHR(
+                try errCheckAllowIncomplete(c.vkGetPhysicalDeviceSurfacePresentModesKHR(
                     self.physical_device[self.physical_device_index_gpu],
                     self.surface,
                     &self.surface_present_mode_count,
                     &self.surface_present_mode,
                 ));
                 std.debug.assert(self.surface_present_mode_count != 0);
+
+                for (0..self.surface_present_mode_count) |index| {
+                    std.debug.assert(self.surface_present_mode[index] != c.VK_PRESENT_MODE_MAX_ENUM_KHR);
+                }
 
                 for (0..self.surface_present_mode_count) |index| {
                     const present_mode = self.surface_present_mode[index];
@@ -545,7 +833,7 @@ pub const VulkanGfx = struct {
                     .oldSwapchain = null,
                 };
 
-                try err_check(c.vkCreateSwapchainKHR(
+                try errCheck(c.vkCreateSwapchainKHR(
                     self.device,
                     &swapchain_create_info,
                     null,
@@ -555,13 +843,16 @@ pub const VulkanGfx = struct {
             }
 
             {
-                try err_check(c.vkGetSwapchainImagesKHR(
+                try errCheck(c.vkGetSwapchainImagesKHR(
                     self.device,
                     self.swapchain,
                     &self.swapchain_image_count,
                     &self.swapchain_image,
                 ));
                 std.debug.assert(self.swapchain_image_count == image_count);
+                for (0..self.swapchain_image_count) |index| {
+                    std.debug.assert(self.swapchain_image[index] != null);
+                }
             }
 
             {
@@ -588,7 +879,7 @@ pub const VulkanGfx = struct {
                         },
                     };
 
-                    try err_check(c.vkCreateImageView(
+                    try errCheck(c.vkCreateImageView(
                         self.device,
                         &image_view_create_info,
                         null,
@@ -621,7 +912,7 @@ pub const VulkanGfx = struct {
                         .codeSize = size.*,
                         .pCode = @ptrCast(code),
                     };
-                    try err_check(c.vkCreateShaderModule(
+                    try errCheck(c.vkCreateShaderModule(
                         self.device,
                         &shader_module_create_info,
                         null,
@@ -754,7 +1045,7 @@ pub const VulkanGfx = struct {
                     .pushConstantRangeCount = 0,
                     .pPushConstantRanges = null,
                 };
-                try err_check(c.vkCreatePipelineLayout(
+                try errCheck(c.vkCreatePipelineLayout(
                     self.device,
                     &pipeline_layout_create_info,
                     null,
@@ -794,6 +1085,15 @@ pub const VulkanGfx = struct {
                     .pPreserveAttachments = null,
                 };
 
+                const subpass_dependency = c.VkSubpassDependency{
+                    .srcSubpass = c.VK_SUBPASS_EXTERNAL,
+                    .dstSubpass = 0,
+                    .srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    .dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    .srcAccessMask = 0,
+                    .dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                };
+
                 const render_pass_create_info = c.VkRenderPassCreateInfo{
                     .sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
                     .pNext = null,
@@ -802,11 +1102,11 @@ pub const VulkanGfx = struct {
                     .pAttachments = &attachment_description_color,
                     .subpassCount = 1,
                     .pSubpasses = &subpass_description,
-                    .dependencyCount = 0,
-                    .pDependencies = null,
+                    .dependencyCount = 1,
+                    .pDependencies = &subpass_dependency,
                 };
 
-                try err_check(c.vkCreateRenderPass(
+                try errCheck(c.vkCreateRenderPass(
                     self.device,
                     &render_pass_create_info,
                     null,
@@ -838,7 +1138,7 @@ pub const VulkanGfx = struct {
                     .basePipelineIndex = 0,
                 };
 
-                try err_check(c.vkCreateGraphicsPipelines(
+                try errCheck(c.vkCreateGraphicsPipelines(
                     self.device,
                     null,
                     1,
@@ -850,18 +1150,108 @@ pub const VulkanGfx = struct {
             }
         }
 
-        // const viewport = c.VkViewport{
-        //     .x = 0,
-        //     .y = 0,
-        //     .width = state.surface_capabilities.currentExtent.width,
-        //     .height = state.surface_capabilities.currentExtent.height,
-        //     .minDepth = 0,
-        //     .maxDepth = 1,
-        // };
+        // framebuffer
+        {
+            for (0..self.swapchain_image_count) |index| {
+                const image_view_attachments = [_]c.VkImageView{
+                    self.swapchain_image_view[index],
+                };
 
-        // const scissor = c.VkRect2D{
-        //     .offset = c.VkOffset2D{ .x = 0, .y = 0 },
-        //     .extent = state.surface_capabilities.currentExtent,
-        // };
+                const extent = self.surface_capabilities.currentExtent;
+                const framebuffer_create_info = c.VkFramebufferCreateInfo{
+                    .sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+                    .pNext = null,
+                    .flags = 0,
+                    .renderPass = self.render_pass,
+                    .attachmentCount = image_view_attachments.len,
+                    .pAttachments = &image_view_attachments,
+                    .width = extent.width,
+                    .height = extent.height,
+                    .layers = 1,
+                };
+
+                try errCheck(c.vkCreateFramebuffer(
+                    self.device,
+                    &framebuffer_create_info,
+                    null,
+                    &self.framebuffer[index],
+                ));
+                std.debug.assert(self.framebuffer[index] != null);
+            }
+        }
+
+        // command
+        {
+            {
+                const command_pool_create_info = c.VkCommandPoolCreateInfo{
+                    .sType = c.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                    .pNext = null,
+                    .flags = c.VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+                    .queueFamilyIndex = self.queue_family_index_graphics,
+                };
+                try errCheck(c.vkCreateCommandPool(
+                    self.device,
+                    &command_pool_create_info,
+                    null,
+                    &self.command_pool,
+                ));
+                std.debug.assert(self.command_pool != null);
+            }
+
+            {
+                const command_buffer_allocate_info = c.VkCommandBufferAllocateInfo{
+                    .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                    .pNext = null,
+                    .commandPool = self.command_pool,
+                    .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                    .commandBufferCount = frame_concurrency,
+                };
+
+                try errCheck(c.vkAllocateCommandBuffers(
+                    self.device,
+                    &command_buffer_allocate_info,
+                    &self.command_buffer,
+                ));
+                for (0..frame_concurrency) |frame_index| {
+                    std.debug.assert(self.command_buffer[frame_index] != null);
+                }
+            }
+        }
+
+        {
+            const semaphore_create_info = c.VkSemaphoreCreateInfo{
+                .sType = c.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+                .pNext = null,
+                .flags = 0,
+            };
+
+            const fence_create_info = c.VkFenceCreateInfo{
+                .sType = c.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+                .pNext = null,
+                .flags = c.VK_FENCE_CREATE_SIGNALED_BIT,
+            };
+
+            inline for (0..frame_concurrency) |frame_concurrency_index| {
+                inline for (0..semaphore_count) |index| {
+                    try errCheck(c.vkCreateSemaphore(
+                        self.device,
+                        &semaphore_create_info,
+                        null,
+                        &self.semaphore[frame_concurrency_index][index],
+                    ));
+                    std.debug.assert(self.semaphore[frame_concurrency_index][index] != null);
+                }
+
+                inline for (0..fence_count) |index| {
+                    try errCheck(c.vkCreateFence(
+                        self.device,
+                        &fence_create_info,
+                        null,
+                        &self.fence[frame_concurrency_index][index],
+                    ));
+                    std.debug.assert(self.fence[frame_concurrency_index][index] != null);
+                }
+            }
+        }
     }
 };
