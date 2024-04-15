@@ -57,7 +57,8 @@ pub fn main() !void {
     var ui = try xcb.init();
     defer ui.kill();
 
-    const gpu = try vk.init(ui);
+    var gpu = vk.VulkanGfx{};
+    try gpu.init(ui);
     defer gpu.kill();
 
     var sound = try alsa.init();
