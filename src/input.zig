@@ -1,14 +1,11 @@
 const std = @import("std");
 
+pub const KeyEvent = enum(u8) { down, up, press, release };
+
 pub const Binding = struct {
-    const Predicate = union(enum) {
-        const Physical = struct {
-            event: enum(u8) {
-                down,
-                up,
-                press,
-                release,
-            },
+    pub const Predicate = union(enum) {
+        pub const Physical = struct {
+            event: KeyEvent,
             key: u8,
 
             fn check(self: Physical, keys: Input.Keys) bool {

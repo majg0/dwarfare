@@ -7,6 +7,10 @@ const c = @cImport({
 const frames_per_second = 500;
 
 const Synth = struct {
+    const Interpolation = enum {
+        linear,
+    };
+
     const Timbre = struct {
         frequencies: [timbre_depth]f64 = undefined,
         velocities: [timbre_depth]f64 = undefined,
@@ -27,23 +31,70 @@ const Synth = struct {
             return result;
         }
     };
-    const Voice = struct {
-        phases: [timbre_depth]f64 = blk: {
-            var phases: [timbre_depth]f64 = undefined;
-            for (&phases, 0..) |*phase, index| {
-                // NOTE: opt out of what's known as "auditory fusion"
-                phase.* = @as(f64, @floatFromInt(index)) / @as(f64, @floatFromInt(voice_count));
+
+    const Adsr = struct {
+        const Stage = struct {
+            /// Speed rather than duration easily allows infinite length.
+            /// A stage ends when its accumulated duration >= 1.
+            /// The easy way to write speeds are to prepend `1.0 / ` and pretend they're durations.
+            /// For example, a `1.0 / 0.1` speed will give rise to a `0.1` second duration.
+            speed: f64 = 0,
+            value_target: f64 = 0,
+            interpolation: Interpolation,
+        };
+
+        const Envelope = struct {
+            const stage_count_max = 5;
+            const stage_last = stage_count_max - 1;
+            stage: [stage_count_max]Stage,
+        };
+
+        const envelope_default = Envelope{
+            .stage = .{
+                .{ .speed = 0, .value_target = 0, .interpolation = .linear },
+                .{ .speed = 1.0 / 0.05, .value_target = 1, .interpolation = .linear },
+                .{ .speed = 1.0 / 0.05, .value_target = 0.5, .interpolation = .linear },
+                .{ .speed = 0, .value_target = 0, .interpolation = .linear },
+                .{ .speed = 1.0 / 2.0, .value_target = 0, .interpolation = .linear },
+            },
+        };
+
+        const State = struct {
+            stage: usize = 0,
+            phase: f64 = 0,
+            /// avoids discontinuities by remembering state
+            value: f64 = 0,
+            /// necessary to know how to interpolate; set to `value` on every transition
+            value_start: f64 = 0,
+
+            fn transition(self: *State, stage: usize) void {
+                self.phase = 0;
+                self.stage = stage;
+                self.value_start = self.value;
             }
-            break :blk phases;
-        },
-        frequency: f64 = 0,
-        // velocity: f64 = 0,
-        timbre_index: usize = Synth.timbre_index_violin,
-        // envelope_state: EnvelopeState = .{},
-        // waveform_index: usize = 0,
+
+            fn sample(self: *State, time_delta: f64) f64 {
+                const stage = Synth.Adsr.envelope_default.stage[self.stage];
+                self.phase += stage.speed * time_delta;
+                if (self.phase >= 1) {
+                    if (self.stage == Synth.Adsr.Envelope.stage_last) {
+                        self.value = 0;
+                        self.transition(0);
+                    } else {
+                        self.value = stage.value_target;
+                        self.transition(self.stage + 1);
+                    }
+                } else {
+                    const t = self.phase;
+                    self.value = switch (stage.interpolation) {
+                        .linear => self.value_start * (1 - t) + stage.value_target * t,
+                    };
+                }
+                return self.value;
+            }
+        };
     };
 
-    const voice_count = 1;
     const timbre_depth = 8;
     const timbre = [_]Timbre{
         Timbre.standard_normalized(.{ 1, 0, 0, 0, 0, 0, 0, 0 }),
@@ -60,16 +111,73 @@ const Synth = struct {
     const timbre_index_harmonic = 1;
     const timbre_index_violin = 2;
 
-    voice: Voice = .{ .frequency = 440 },
-};
+    const Voice = struct {
+        /// avoids stolen voices ending too early when `voice_end` is called with a stale generation
+        generation: u32 = 0,
+        phases: [timbre_depth]f64 = blk: {
+            var phases: [timbre_depth]f64 = undefined;
+            for (&phases, 0..) |*phase, index| {
+                // NOTE: opt out of what's known as "auditory fusion"
+                phase.* = @as(f64, @floatFromInt(index)) / @as(f64, @floatFromInt(voice_count));
+            }
+            break :blk phases;
+        },
+        frequency: f64 = 0,
+        timbre_index: usize = Synth.timbre_index_violin,
+        state: Adsr.State = .{},
+    };
 
-// const EnvelopeState = struct {
-//     envelope_index: usize = 0,
-//     state_index: i32 = -1,
-//     phase: f64 = 0,
-//     value_start: f64 = 0,
-//     value: f64 = 0,
-// };
+    const voice_count_bits = 4;
+    const voice_count = 1 << voice_count_bits;
+    const voice_count_mask = voice_count - 1;
+
+    voice: [voice_count]Voice = blk: {
+        var voices: [voice_count]Voice = undefined;
+        for (&voices) |*voice| {
+            voice.* = .{};
+        }
+        break :blk voices;
+    },
+    voice_index_next: usize = 0,
+
+    fn voice_alloc(self: *Synth) usize {
+        const voice_index_start = self.voice_index_next;
+        self.voice_index_next = (self.voice_index_next + 1) & voice_count_mask;
+
+        for (0..voice_count_mask) |offset| {
+            const voice_index = (voice_index_start + offset) & voice_count_mask;
+            if (self.voice[voice_index].state.stage == 0) {
+                return voice_index;
+            }
+        }
+
+        for (0..voice_count_mask) |offset| {
+            const voice_index = (voice_index_start + offset) & voice_count_mask;
+            if (self.voice[voice_index].state.stage == Adsr.Envelope.stage_last) {
+                return voice_index;
+            }
+        }
+
+        return self.voice_index_next;
+    }
+
+    pub fn voice_start(self: *Synth, frequency: f64) usize {
+        const index = self.voice_alloc();
+        var v = &self.voice[index];
+        v.frequency = frequency;
+        v.state.transition(1);
+        v.generation += 1;
+        return (v.generation << 16) + index;
+    }
+
+    pub fn voice_end(self: *Synth, id: usize) void {
+        const index = id & 0xffff;
+        const generation = (id & 0xffff0000) >> 16;
+        if (self.voice[index].generation == generation) {
+            self.voice[index].state.transition(Adsr.Envelope.stage_last);
+        }
+    }
+};
 
 const AlsaAudio = struct {
     audio_data: []u8,
@@ -89,6 +197,8 @@ const AlsaAudio = struct {
         err_check(c.snd_pcm_close(self.pcm_handle)) catch {};
     }
     pub fn update(self: *AlsaAudio) !void {
+        const time_delta = 1.0 / @as(f64, @floatFromInt(self.sample_rate));
+
         while (true) {
             const avail = c.snd_pcm_avail_update(self.pcm_handle);
             if (avail == -c.EPIPE) {
@@ -115,61 +225,66 @@ const AlsaAudio = struct {
 
                 // interleaved write
                 for (0..self.frame_size) |sample_local| {
-                    const step = 1.0 / @as(f64, @floatFromInt(self.sample_rate));
-
                     var amplitude: f64 = 0;
-                    var voice = &self.synth.voice;
-                    for (&voice.phases, 0..) |*phase, phase_index| {
-                        const timbre = Synth.timbre[voice.timbre_index];
-                        phase.* += voice.frequency * timbre.frequencies[phase_index] * step;
-                        phase.* -= std.math.modf(phase.*).ipart;
-                        amplitude += wavetable_read(wavetable_sine, phase.*) *
-                            timbre.velocities[phase_index];
+                    for (&self.synth.voice) |*voice| {
+                        for (&voice.phases, 0..) |*phase, phase_index| {
+                            const timbre = Synth.timbre[voice.timbre_index];
+                            amplitude += wavetable_read(wavetable_sine, phase.*) *
+                                timbre.velocities[phase_index] *
+                                voice.state.sample(time_delta);
+                            phase.* = std.math.modf(phase.* +
+                                voice.frequency *
+                                timbre.frequencies[phase_index] *
+                                time_delta).fpart;
+                        }
                     }
 
-                    amplitude = std.math.clamp(amplitude, -1, 1);
+                    const sample = std.math.clamp(
+                        self.master_volume * 0.5 * amplitude,
+                        -1,
+                        1,
+                    );
 
-                    const volume = 0.5 * self.master_volume;
                     for (0..self.channel_count) |channel_index| {
                         const i = sample_local * self.channel_count + channel_index;
 
                         switch (self.format) {
                             c.SND_PCM_FORMAT_FLOAT64_LE => {
-                                std.mem.bytesAsSlice(f64, self.audio_data)[i] = volume * amplitude;
+                                std.mem.bytesAsSlice(f64, self.audio_data)[i] = sample;
                             },
                             c.SND_PCM_FORMAT_FLOAT_LE => {
                                 std.mem.bytesAsSlice(f32, self.audio_data)[i] =
-                                    @floatCast(volume * amplitude);
+                                    @floatCast(sample);
                             },
                             c.SND_PCM_FORMAT_S32_LE => {
                                 const range: f64 = comptime @floatFromInt(1 << 31);
                                 std.mem.bytesAsSlice(i32, self.audio_data)[i] =
-                                    @intFromFloat(range * volume * amplitude);
+                                    @intFromFloat(range * sample);
                             },
                             c.SND_PCM_FORMAT_S16_LE => {
                                 const range: f64 = comptime @floatFromInt(1 << 15);
                                 std.mem.bytesAsSlice(i16, self.audio_data)[i] =
-                                    @intFromFloat(range * volume * amplitude);
+                                    @intFromFloat(range * sample);
                             },
                             c.SND_PCM_FORMAT_S8 => {
                                 const range: f64 = comptime @floatFromInt(1 << 7);
                                 std.mem.bytesAsSlice(i8, self.audio_data)[i] =
-                                    @intFromFloat(range * volume * amplitude);
+                                    @intFromFloat(range * sample);
                             },
                             c.SND_PCM_FORMAT_U32_LE => {
                                 const range: f64 = comptime @floatFromInt(1 << 31);
                                 std.mem.bytesAsSlice(u32, self.audio_data)[i] =
-                                    @intFromFloat((range - 1.0) * (volume * amplitude) + range);
+                                    @intFromFloat((range - 1.0) * sample + range);
                             },
                             c.SND_PCM_FORMAT_U16_LE => {
                                 const range: f64 = comptime @floatFromInt(1 << 15);
                                 std.mem.bytesAsSlice(u16, self.audio_data)[i] =
-                                    @intFromFloat((range - 1.0) * (volume * amplitude) + range);
+                                    @intFromFloat((range - 1.0) * sample + range);
                             },
                             c.SND_PCM_FORMAT_U8 => {
                                 const range: f64 = comptime @floatFromInt(1 << 7);
                                 self.audio_data[i] = @intFromFloat((range - 1.0) *
-                                    (volume * amplitude) + range);
+                                    sample + range);
                             },
                             else => {
                                 std.debug.print("missing format implementation {}", .{self.format});
