@@ -202,7 +202,7 @@ pub fn main() !void {
         if (bindings.main.play.octave_next.check(input)) octave *= 2;
 
         if ((input.wm.flags & @intFromEnum(inp.Input.Wm.Event.resize)) != 0) {
-            try gpu.swapchainInit();
+            try gpu.swapchainInit(false);
         }
 
         try gpu.frameDraw();

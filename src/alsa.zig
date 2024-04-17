@@ -4,7 +4,6 @@ const c = @cImport({
     @cInclude("alsa/asoundlib.h");
 });
 
-// TODO: improve
 const frames_per_second = 500;
 
 const AlsaAudio = struct {
