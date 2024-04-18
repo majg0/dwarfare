@@ -4,7 +4,7 @@ const c = @cImport({
     @cInclude("alsa/asoundlib.h");
 });
 
-const frames_per_second = 500;
+const frames_per_second = 50;
 
 const AlsaAudio = struct {
     audio_data: []u8,
@@ -30,7 +30,7 @@ const AlsaAudio = struct {
             const avail = c.snd_pcm_avail_update(self.pcm_handle);
             if (avail == -c.EPIPE) {
                 // NOTE: XRun means buffer underrun or overrun
-                return error.AlsaXRun;
+                // return error.AlsaXRun;
             } else try err_check(@truncate(avail));
 
             const samples_written = c.snd_pcm_writei(

@@ -59,7 +59,6 @@ const instance_extension_count_max = 64;
 const instance_layer_count_max = 64;
 const physical_device_count_max = 8;
 const queue_family_count_max = 16;
-const physical_device_group_count_max = 16;
 const device_extension_count_max = 512;
 const surface_format_count_max = 8;
 const surface_present_mode_count_max = 8;
@@ -163,8 +162,6 @@ pub const Vulkan = struct {
     queue_family_count: u32 = queue_family_count_max,
     queue_family: [queue_family_count_max]c.VkQueueFamilyProperties = undefined,
     queue_family_index_graphics: u32 = int_invalid,
-    physical_device_group_count: u32 = physical_device_group_count_max,
-    physical_device_group: [physical_device_group_count_max]c.VkPhysicalDeviceGroupProperties = undefined,
     device_extension_count: u32 = device_extension_count_max,
     device_extension: [device_extension_count_max]c.VkExtensionProperties = undefined,
     device: c.VkDevice = null,
@@ -368,18 +365,9 @@ pub const Vulkan = struct {
 
                 for (0..self.surface_present_mode_count) |index| {
                     const present_mode = self.surface_present_mode[index];
-                    if (present_mode == c.VK_PRESENT_MODE_MAILBOX_KHR) {
+                    if (present_mode == c.VK_PRESENT_MODE_FIFO_KHR) {
                         self.surface_present_mode_index_vsync = index;
                         break;
-                    }
-                }
-                if (self.surface_present_mode_index_vsync == int_invalid) {
-                    for (0..self.surface_present_mode_count) |index| {
-                        const present_mode = self.surface_present_mode[index];
-                        if (present_mode == c.VK_PRESENT_MODE_FIFO_KHR) {
-                            self.surface_present_mode_index_vsync = index;
-                            break;
-                        }
                     }
                 }
                 std.debug.assert(self.surface_present_mode_index_vsync != int_invalid);
