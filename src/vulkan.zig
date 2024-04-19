@@ -24,10 +24,22 @@ const Vertex = extern struct {
     color: Vec3,
 };
 
-var vertices: [3]Vertex align(8) = [_]Vertex{
-    .{ .pos = .{ 0, -0.5 }, .color = .{ 1, 0, 0 } },
-    .{ .pos = .{ 0.5, 0.5 }, .color = .{ 0, 1, 0 } },
-    .{ .pos = .{ -0.5, 0.5 }, .color = .{ 0, 0, 1 } },
+const RenderData = extern struct {
+    vertices: [4]Vertex align(8),
+    indices: [6]u16 align(8),
+};
+
+var render_data = RenderData{
+    .vertices = [_]Vertex{
+        .{ .pos = .{ -0.5, -0.5 }, .color = .{ 1, 0, 0 } },
+        .{ .pos = .{ 0.5, -0.5 }, .color = .{ 0, 1, 0 } },
+        .{ .pos = .{ 0.5, 0.5 }, .color = .{ 0, 0, 1 } },
+        .{ .pos = .{ -0.5, 0.5 }, .color = .{ 1, 1, 1 } },
+    },
+    .indices = [_]u16{
+        0, 1, 2,
+        2, 3, 0,
+    },
 };
 
 ///////////////////////////
@@ -941,10 +953,18 @@ pub const Vulkan = struct {
                 &@as(u64, 0),
             );
 
-            c.vkCmdDraw(
+            c.vkCmdBindIndexBuffer(
                 self.command_buffer[self.swapchain_frame_index_draw],
-                vertices.len,
+                self.buffer[device_memory_index_device_local],
+                @offsetOf(RenderData, "indices"),
+                c.VK_INDEX_TYPE_UINT16,
+            );
+
+            c.vkCmdDrawIndexed(
+                self.command_buffer[self.swapchain_frame_index_draw],
+                render_data.indices.len,
                 1,
+                0,
                 0,
                 0,
             );
@@ -1297,7 +1317,7 @@ pub const Vulkan = struct {
                     .sType = c.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
                     .pNext = null,
                     .flags = 0,
-                    .size = @sizeOf(Vertex) * vertices.len,
+                    .size = @sizeOf(RenderData),
                     .usage = c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                     .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
                     .queueFamilyIndexCount = 0,
@@ -1307,8 +1327,8 @@ pub const Vulkan = struct {
                     .sType = c.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
                     .pNext = null,
                     .flags = 0,
-                    .size = @sizeOf(Vertex) * vertices.len,
-                    .usage = c.VK_BUFFER_USAGE_TRANSFER_DST_BIT | c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                    .size = @sizeOf(RenderData),
+                    .usage = c.VK_BUFFER_USAGE_TRANSFER_DST_BIT | c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | c.VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
                     .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
                     .queueFamilyIndexCount = 0,
                     .pQueueFamilyIndices = null,
@@ -1388,9 +1408,9 @@ pub const Vulkan = struct {
             }
         }
 
-        // write vertex buffer to device staging memory
+        // write draw buffer to device staging memory
         {
-            const size = @sizeOf(@TypeOf(vertices));
+            const size = @sizeOf(RenderData);
             var data: ?*anyopaque = null;
             try errCheck(c.vkMapMemory(
                 self.device,
@@ -1401,7 +1421,7 @@ pub const Vulkan = struct {
                 &data,
             ));
             std.debug.assert(data != null);
-            @memcpy(@as(*[size]u8, @ptrCast(data)), std.mem.asBytes(&vertices));
+            @memcpy(@as(*[size]u8, @ptrCast(data)), std.mem.asBytes(&render_data));
             c.vkUnmapMemory(self.device, self.device_memory[device_memory_index_host_staging]);
         }
 
@@ -1441,7 +1461,7 @@ pub const Vulkan = struct {
                 &.{
                     .srcOffset = 0,
                     .dstOffset = 0,
-                    .size = @sizeOf(Vertex) * vertices.len,
+                    .size = @sizeOf(RenderData),
                 },
             );
 
