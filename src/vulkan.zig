@@ -69,10 +69,12 @@ const semaphore_count = 2;
 const timeout_half_second = 500e6;
 const swapchain_frame_concurrency = 2;
 const fence_count = 1;
-const buffer_count = 1;
-const buffer_index_vertex = 0;
-const device_memory_count = 1;
-const device_memory_index_host_coherent = 0;
+const command_pool_count = 2;
+const command_pool_index_staging = 0;
+const command_pool_index_swapchain = 1;
+const device_memory_count = 2;
+const device_memory_index_host_staging = 0;
+const device_memory_index_device_local = 1;
 
 fn initArray(comptime T: type, comptime size: usize, comptime value: T) [size]T {
     var array: [size]T = undefined;
@@ -162,6 +164,7 @@ pub const Vulkan = struct {
     queue_family_count: u32 = queue_family_count_max,
     queue_family: [queue_family_count_max]c.VkQueueFamilyProperties = undefined,
     queue_family_index_graphics: u32 = int_invalid,
+    queue: c.VkQueue = null,
     device_extension_count: u32 = device_extension_count_max,
     device_extension: [device_extension_count_max]c.VkExtensionProperties = undefined,
     device: c.VkDevice = null,
@@ -216,7 +219,11 @@ pub const Vulkan = struct {
         swapchain_image_count_max,
         null,
     ),
-    command_pool: c.VkCommandPool = null,
+    command_pool: [command_pool_count]c.VkCommandPool = initArray(
+        c.VkCommandPool,
+        command_pool_count,
+        null,
+    ),
     command_buffer: [swapchain_frame_concurrency]c.VkCommandBuffer = initArray(
         c.VkCommandBuffer,
         swapchain_frame_concurrency,
@@ -236,25 +243,22 @@ pub const Vulkan = struct {
     ),
     fence_index_queue_submitted: u32 = 0,
     swapchain_frame_index_draw: usize = 0,
-    // TODO: suballocate from a single buffer
-    buffer: [buffer_count]c.VkBuffer = initArray(
+    buffer: [device_memory_count]c.VkBuffer = initArray(
         c.VkBuffer,
-        buffer_count,
+        device_memory_count,
         null,
     ),
-    buffer_memory_requirements: [buffer_count]c.VkMemoryRequirements = undefined,
+    buffer_memory_requirements: [device_memory_count]c.VkMemoryRequirements = undefined,
     device_memory: [device_memory_count]c.VkDeviceMemory = initArray(
         c.VkDeviceMemory,
-        buffer_count,
+        device_memory_count,
         null,
     ),
 
     pub fn kill(self: Vulkan) void {
         _ = c.vkDeviceWaitIdle(self.device);
-        inline for (0..buffer_count) |index| {
-            c.vkDestroyBuffer(self.device, self.buffer[index], null);
-        }
         inline for (0..device_memory_count) |index| {
+            c.vkDestroyBuffer(self.device, self.buffer[index], null);
             c.vkFreeMemory(self.device, self.device_memory[index], null);
         }
         self.swapchainKill();
@@ -266,7 +270,9 @@ pub const Vulkan = struct {
                 c.vkDestroySemaphore(self.device, self.semaphore[frame_concurrency_index][index], null);
             }
         }
-        c.vkDestroyCommandPool(self.device, self.command_pool, null);
+        for (0..command_pool_count) |index| {
+            c.vkDestroyCommandPool(self.device, self.command_pool[index], null);
+        }
         c.vkDestroyPipeline(self.device, self.pipeline_graphics, null);
         c.vkDestroyRenderPass(self.device, self.render_pass, null);
         c.vkDestroyPipelineLayout(self.device, self.pipeline_layout, null);
@@ -847,18 +853,6 @@ pub const Vulkan = struct {
             &self.fence[self.swapchain_frame_index_draw][self.fence_index_queue_submitted],
         ));
 
-        // queue
-        var queue: c.VkQueue = null;
-        {
-            c.vkGetDeviceQueue(
-                self.device,
-                self.queue_family_index_graphics,
-                self.queue_index_graphics,
-                &queue,
-            );
-            std.debug.assert(queue != null);
-        }
-
         try errCheck(c.vkResetCommandBuffer(self.command_buffer[self.swapchain_frame_index_draw], 0));
 
         // command render pass
@@ -943,7 +937,7 @@ pub const Vulkan = struct {
                 self.command_buffer[self.swapchain_frame_index_draw],
                 0,
                 1,
-                &self.buffer[buffer_index_vertex],
+                &self.buffer[device_memory_index_device_local],
                 &@as(u64, 0),
             );
 
@@ -974,7 +968,7 @@ pub const Vulkan = struct {
             };
 
             try errCheck(c.vkQueueSubmit(
-                queue,
+                self.queue,
                 1,
                 &submit_info,
                 self.fence[self.swapchain_frame_index_draw][self.fence_index_queue_submitted],
@@ -994,7 +988,7 @@ pub const Vulkan = struct {
                 .pResults = null,
             };
 
-            const result = c.vkQueuePresentKHR(queue, &present_info);
+            const result = c.vkQueuePresentKHR(self.queue, &present_info);
 
             switch (result) {
                 c.VK_ERROR_OUT_OF_DATE_KHR => try self.swapchainInit(false),
@@ -1241,6 +1235,17 @@ pub const Vulkan = struct {
             std.debug.assert(self.device != null);
         }
 
+        // queue
+        {
+            c.vkGetDeviceQueue(
+                self.device,
+                self.queue_family_index_graphics,
+                self.queue_index_graphics,
+                &self.queue,
+            );
+            std.debug.assert(self.queue != null);
+        }
+
         // check physical device surface support
         {
             var supported = c.VK_FALSE;
@@ -1260,46 +1265,70 @@ pub const Vulkan = struct {
 
         // create command pool
         {
-            const command_pool_create_info = c.VkCommandPoolCreateInfo{
+            var command_pool_create_info: [command_pool_count]c.VkCommandPoolCreateInfo = undefined;
+            command_pool_create_info[command_pool_index_staging] = .{
+                .sType = c.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                .pNext = null,
+                .flags = c.VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+                .queueFamilyIndex = self.queue_family_index_graphics,
+            };
+            command_pool_create_info[command_pool_index_swapchain] = .{
                 .sType = c.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
                 .pNext = null,
                 .flags = c.VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
                 .queueFamilyIndex = self.queue_family_index_graphics,
             };
-            try errCheck(c.vkCreateCommandPool(
-                self.device,
-                &command_pool_create_info,
-                null,
-                &self.command_pool,
-            ));
-            std.debug.assert(self.command_pool != null);
+
+            inline for (0..command_pool_count) |index| {
+                try errCheck(c.vkCreateCommandPool(
+                    self.device,
+                    &command_pool_create_info[index],
+                    null,
+                    &self.command_pool[index],
+                ));
+                std.debug.assert(self.command_pool[index] != null);
+            }
         }
 
-        // create vertex buffer
+        // create buffers
         {
-            const buffer_create_info = c.VkBufferCreateInfo{
-                .sType = c.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-                .pNext = null,
-                .flags = 0,
-                .size = @sizeOf(Vertex) * vertices.len,
-                .usage = c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
-                .queueFamilyIndexCount = 0,
-                .pQueueFamilyIndices = null,
+            const buffer_create_info = [device_memory_count]c.VkBufferCreateInfo{
+                c.VkBufferCreateInfo{
+                    .sType = c.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                    .pNext = null,
+                    .flags = 0,
+                    .size = @sizeOf(Vertex) * vertices.len,
+                    .usage = c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                    .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
+                    .queueFamilyIndexCount = 0,
+                    .pQueueFamilyIndices = null,
+                },
+                c.VkBufferCreateInfo{
+                    .sType = c.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                    .pNext = null,
+                    .flags = 0,
+                    .size = @sizeOf(Vertex) * vertices.len,
+                    .usage = c.VK_BUFFER_USAGE_TRANSFER_DST_BIT | c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                    .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
+                    .queueFamilyIndexCount = 0,
+                    .pQueueFamilyIndices = null,
+                },
             };
 
-            try errCheck(c.vkCreateBuffer(
-                self.device,
-                &buffer_create_info,
-                null,
-                &self.buffer[buffer_index_vertex],
-            ));
-            std.debug.assert(self.buffer[buffer_index_vertex] != null);
+            inline for (0..device_memory_count) |index| {
+                try errCheck(c.vkCreateBuffer(
+                    self.device,
+                    &buffer_create_info[index],
+                    null,
+                    &self.buffer[index],
+                ));
+                std.debug.assert(self.buffer[index] != null);
+            }
         }
 
         // query buffer memory requirements
         {
-            inline for (0..buffer_count) |index| {
+            inline for (0..device_memory_count) |index| {
                 c.vkGetBufferMemoryRequirements(
                     self.device,
                     self.buffer[index],
@@ -1310,65 +1339,62 @@ pub const Vulkan = struct {
 
         // allocate memory
         {
-            var memory_requirements = c.VkMemoryRequirements{
-                .size = 0,
-                .alignment = 1,
-                .memoryTypeBits = 0,
-            };
-            inline for (0..buffer_count) |index| {
-                const req = self.buffer_memory_requirements[index];
-                memory_requirements.size += req.size;
-                memory_requirements.alignment = @max(memory_requirements.alignment, req.alignment);
-                memory_requirements.memoryTypeBits |= req.memoryTypeBits;
-            }
+            var memory_properties_required: [device_memory_count]u32 = undefined;
+            memory_properties_required[device_memory_index_host_staging] = c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+            memory_properties_required[device_memory_index_device_local] = c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 
-            const properties_required = c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+            inline for (0..device_memory_count) |device_memory_index| {
+                const memory_requirements = self.buffer_memory_requirements[device_memory_index];
+                const properties_required = memory_properties_required[device_memory_index];
 
-            const memory_type_index: u32 = blk: {
-                const memory_properties = self.physical_device_memory_properties[self.physical_device_index_gpu];
-                for (0..memory_properties.memoryTypeCount) |index| {
-                    const memory_type_required = (memory_requirements.memoryTypeBits & std.math.shl(u32, 1, index)) != 0;
-                    const properties_satisfied = (memory_properties.memoryTypes[index].propertyFlags & properties_required) == properties_required;
-                    if (memory_type_required and properties_satisfied) {
-                        break :blk @intCast(index);
+                const memory_type_index: u32 = blk: {
+                    const memory_properties = self.physical_device_memory_properties[self.physical_device_index_gpu];
+                    for (0..memory_properties.memoryTypeCount) |index| {
+                        const memory_type_required = (memory_requirements.memoryTypeBits & std.math.shl(u32, 1, index)) != 0;
+                        const properties_satisfied = (memory_properties.memoryTypes[index].propertyFlags & properties_required) == properties_required;
+                        if (memory_type_required and properties_satisfied) {
+                            break :blk @intCast(index);
+                        }
                     }
-                }
-                return error.VkMemoryTypeIndexNotFound;
-            };
+                    return error.VkMemoryTypeIndexNotFound;
+                };
 
-            const memory_allocate_info = c.VkMemoryAllocateInfo{
-                .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-                .pNext = null,
-                .allocationSize = memory_requirements.size,
-                .memoryTypeIndex = memory_type_index,
-            };
+                const memory_allocate_info = c.VkMemoryAllocateInfo{
+                    .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                    .pNext = null,
+                    .allocationSize = memory_requirements.size,
+                    .memoryTypeIndex = memory_type_index,
+                };
 
-            try errCheck(c.vkAllocateMemory(
-                self.device,
-                &memory_allocate_info,
-                null,
-                &self.device_memory[device_memory_index_host_coherent],
-            ));
-            std.debug.assert(self.device_memory[device_memory_index_host_coherent] != null);
+                try errCheck(c.vkAllocateMemory(
+                    self.device,
+                    &memory_allocate_info,
+                    null,
+                    &self.device_memory[device_memory_index],
+                ));
+                std.debug.assert(self.device_memory[device_memory_index] != null);
+            }
         }
 
         // bind buffer memory
         {
-            try errCheck(c.vkBindBufferMemory(
-                self.device,
-                self.buffer[buffer_index_vertex],
-                self.device_memory[device_memory_index_host_coherent],
-                0,
-            ));
+            inline for (0..device_memory_count) |index| {
+                try errCheck(c.vkBindBufferMemory(
+                    self.device,
+                    self.buffer[index],
+                    self.device_memory[index],
+                    0,
+                ));
+            }
         }
 
-        // copy vertex buffer to device memory
+        // write vertex buffer to device staging memory
         {
             const size = @sizeOf(@TypeOf(vertices));
             var data: ?*anyopaque = null;
             try errCheck(c.vkMapMemory(
                 self.device,
-                self.device_memory[device_memory_index_host_coherent],
+                self.device_memory[device_memory_index_host_staging],
                 0,
                 size,
                 0,
@@ -1376,15 +1402,83 @@ pub const Vulkan = struct {
             ));
             std.debug.assert(data != null);
             @memcpy(@as(*[size]u8, @ptrCast(data)), std.mem.asBytes(&vertices));
-            c.vkUnmapMemory(self.device, self.device_memory[device_memory_index_host_coherent]);
+            c.vkUnmapMemory(self.device, self.device_memory[device_memory_index_host_staging]);
         }
 
-        // allocate command buffers
+        // copy from staging memory to device local memory
+        {
+            var command_buffer: c.VkCommandBuffer = null;
+            {
+                try errCheck(c.vkAllocateCommandBuffers(
+                    self.device,
+                    &.{
+                        .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                        .pNext = null,
+                        .commandPool = self.command_pool[command_pool_index_staging],
+                        .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                        .commandBufferCount = 1,
+                    },
+                    &command_buffer,
+                ));
+                std.debug.assert(command_buffer != null);
+            }
+
+            try errCheck(c.vkBeginCommandBuffer(
+                command_buffer,
+                &.{
+                    .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                    .pNext = null,
+                    .flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+                    .pInheritanceInfo = null,
+                },
+            ));
+
+            c.vkCmdCopyBuffer(
+                command_buffer,
+                self.buffer[device_memory_index_host_staging],
+                self.buffer[device_memory_index_device_local],
+                1,
+                &.{
+                    .srcOffset = 0,
+                    .dstOffset = 0,
+                    .size = @sizeOf(Vertex) * vertices.len,
+                },
+            );
+
+            try errCheck(c.vkEndCommandBuffer(command_buffer));
+
+            try errCheck(c.vkQueueSubmit(
+                self.queue,
+                1,
+                &.{
+                    .sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                    .pNext = null,
+                    .waitSemaphoreCount = 0,
+                    .pWaitSemaphores = null,
+                    .pWaitDstStageMask = null,
+                    .commandBufferCount = 1,
+                    .pCommandBuffers = &command_buffer,
+                    .signalSemaphoreCount = 0,
+                    .pSignalSemaphores = null,
+                },
+                null,
+            ));
+            try errCheck(c.vkQueueWaitIdle(self.queue));
+
+            c.vkFreeCommandBuffers(
+                self.device,
+                self.command_pool[command_pool_index_staging],
+                1,
+                &command_buffer,
+            );
+        }
+
+        // allocate swapchain command buffers
         {
             const command_buffer_allocate_info = c.VkCommandBufferAllocateInfo{
                 .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
                 .pNext = null,
-                .commandPool = self.command_pool,
+                .commandPool = self.command_pool[command_pool_index_swapchain],
                 .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
                 .commandBufferCount = swapchain_frame_concurrency,
             };
