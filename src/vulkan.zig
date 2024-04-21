@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const xcb = @import("./xcb.zig");
+const m = @import("./math.zig");
 const c = @cImport({
     @cInclude("vulkan/vulkan.h");
     @cInclude("xcb/xcb.h");
@@ -9,24 +10,83 @@ const c = @cImport({
 
 // DOCS: https://docs.vulkan.org/spec/latest/index.html
 
-///////////////////// move to math file //////////////
+// DOCS: https://registry.khronos.org/vulkan/specs/1.3-extensions/html/chap15.html#interfaces-resources-layout
+fn vkBaseAlign(comptime T: type) comptime_int {
+    return switch (@typeInfo(T)) {
+        // NOTE: A scalar of size N has a scalar alignment of N.
+        .Float => @sizeOf(T),
+        .Int => @sizeOf(T),
+        .ComptimeFloat => @sizeOf(T),
+        .ComptimeInt => @sizeOf(T),
 
-const Real = f32;
+        .Vector => |vector| switch (vector.len) {
+            // NOTE: A two-component vector has a base alignment equal to twice its scalar alignment.
+            2 => 2 * @sizeOf(vector.child),
+            // NOTE: A three- or four-component vector has a base alignment equal to four times its scalar alignment.
+            3 => 4 * @sizeOf(vector.child),
+            4 => 4 * @sizeOf(vector.child),
+            else => unreachable,
+        },
 
-const Vec2 = [2]Real;
+        // NOTE: An array has a base alignment equal to the base alignment of its element type.
+        // NOTE: A matrix type inherits base alignment from the equivalent array declaration.
+        .Array => |array| vkBaseAlign(array.child),
 
-const Vec3 = [3]Real;
+        // NOTE: A structure has a base alignment equal to the largest base alignment of any of its members.
+        .Struct => |s| blk: {
+            var max = 0;
+            for (s.fields) |field| {
+                // NOTE: fields are assumed to explicitly aligned, so we don't need recursion.
+                max = @max(field.alignment, max);
+            }
+            break :blk max;
+        },
+
+        else => unreachable,
+    };
+}
+
+// NOTE: run using `zig test src/vulkan.zig` until integrated with `build.zig`
+// TODO: integrate with `build.zig`
+test "vulkan alignment" {
+    try std.testing.expectEqual(@sizeOf(m.Real), vkBaseAlign(m.Real));
+    try std.testing.expectEqual(@sizeOf(m.Real), vkBaseAlign([4]m.Real));
+    try std.testing.expectEqual(2 * @sizeOf(m.Real), vkBaseAlign(m.Vec2));
+    try std.testing.expectEqual(4 * @sizeOf(m.Real), vkBaseAlign(m.Vec3));
+    try std.testing.expectEqual(@max(vkBaseAlign(m.Vec2), vkBaseAlign(m.Vec3)), vkBaseAlign(Vertex));
+    // TODO: standard buffer alignment
+
+    // TODO: move this out of base alignment requirements
+    // .Array => |array| switch (@typeInfo(array.child)) {
+    //     // NOTE: All vectors must be aligned according to their scalar alignment.
+    //     .Vector => |vector| vector.len * vkBaseAlign(vector.child),
+    //     // TODO: how to enforce the following?
+    //     // If the uniformBufferStandardLayout feature is not enabled on the device, then any member of an OpTypeStruct with a storage class of Uniform and a decoration of Block must be aligned according to its extended alignment.
+
+    //     // NOTE: Every other member must be aligned according to its base alignment.
+    //     else => vkBaseAlign(array.child),
+    // },
+
+    // try std.testing.expectEqual(3 * @sizeOf(Real), vkBaseAlign([1]Vec3));
+}
 
 ///////////////////////// temp static data
 
+// TODO: use standard buffer alignment instead
 const Vertex = extern struct {
-    pos: Vec2,
-    color: Vec3,
+    pos: m.Vec2 align(vkBaseAlign(m.Vec2)),
+    color: m.Vec3 align(vkBaseAlign(m.Vec3)),
+};
+
+const UniformBufferObject = extern struct {
+    model: m.Mat4,
+    view: m.Mat4,
+    proj: m.Mat4,
 };
 
 const RenderData = extern struct {
-    vertices: [4]Vertex align(8),
-    indices: [6]u16 align(8),
+    vertices: [4]Vertex align(vkBaseAlign([4]Vertex)),
+    indices: [6]u16 align(vkBaseAlign([6]u16)),
 };
 
 var render_data = RenderData{
@@ -57,7 +117,7 @@ const instance_extension_enable = [_][*c]const u8{
     if (builtin.os.tag == std.Target.Os.Tag.linux)
         c.VK_KHR_XCB_SURFACE_EXTENSION_NAME
     else
-        unreachable,
+        @compileError("unsupported os"),
 };
 const device_extension_enable = [_][*c]const u8{
     c.VK_KHR_SWAPCHAIN_EXTENSION_NAME,
@@ -79,14 +139,14 @@ const shader_size_max = 2048;
 const shader_count = 2;
 const semaphore_count = 2;
 const timeout_half_second = 500e6;
-const swapchain_frame_concurrency = 2;
 const fence_count = 1;
 const command_pool_count = 2;
 const command_pool_index_staging = 0;
 const command_pool_index_swapchain = 1;
+const buffer_count_max = 8;
 const device_memory_count = 2;
-const device_memory_index_host_staging = 0;
-const device_memory_index_device_local = 1;
+const device_memory_index_device_local = 0;
+const device_memory_index_host_staging = 1;
 
 fn initArray(comptime T: type, comptime size: usize, comptime value: T) [size]T {
     var array: [size]T = undefined;
@@ -156,6 +216,12 @@ fn errCheckAllowIncomplete(result: c.VkResult) !void {
     return errCheck(result);
 }
 
+// TODO: move somewhere else if reused
+const Slice = struct {
+    offset: usize,
+    size: usize,
+};
+
 pub const Vulkan = struct {
     instance_version: u32 = int_invalid,
     instance_extension_count: u32 = instance_extension_count_max,
@@ -222,10 +288,10 @@ pub const Vulkan = struct {
     ),
     shader_index_vert: usize = 0,
     shader_index_frag: usize = 1,
+    descriptor_set_layout_uniform: c.VkDescriptorSetLayout = null,
     pipeline_layout: c.VkPipelineLayout = null,
     render_pass: c.VkRenderPass = null,
     pipeline_graphics: c.VkPipeline = null,
-    framebuffer_count: u32 = swapchain_image_count_max,
     framebuffer: [swapchain_image_count_max]c.VkFramebuffer = initArray(
         c.VkFramebuffer,
         swapchain_image_count_max,
@@ -236,50 +302,79 @@ pub const Vulkan = struct {
         command_pool_count,
         null,
     ),
-    command_buffer: [swapchain_frame_concurrency]c.VkCommandBuffer = initArray(
+    command_buffer: [swapchain_image_count_max]c.VkCommandBuffer = initArray(
         c.VkCommandBuffer,
-        swapchain_frame_concurrency,
+        swapchain_image_count_max,
         null,
     ),
-    semaphore: [swapchain_frame_concurrency][semaphore_count]c.VkSemaphore = initArray(
+    semaphore: [swapchain_image_count_max][semaphore_count]c.VkSemaphore = initArray(
         [semaphore_count]c.VkSemaphore,
-        swapchain_frame_concurrency,
+        swapchain_image_count_max,
         initArray(c.VkSemaphore, semaphore_count, null),
     ),
     semaphore_index_surface_image_acquired: usize = 0,
     semaphore_index_render_finished: usize = 1,
-    fence: [swapchain_frame_concurrency][fence_count]c.VkFence = initArray(
+    fence: [swapchain_image_count_max][fence_count]c.VkFence = initArray(
         [fence_count]c.VkFence,
-        swapchain_frame_concurrency,
+        swapchain_image_count_max,
         initArray(c.VkFence, fence_count, null),
     ),
     fence_index_queue_submitted: u32 = 0,
     swapchain_frame_index_draw: usize = 0,
-    buffer: [device_memory_count]c.VkBuffer = initArray(
+    buffer_count: usize = 0,
+    buffer: [buffer_count_max]c.VkBuffer = initArray(
         c.VkBuffer,
-        device_memory_count,
+        buffer_count_max,
         null,
     ),
-    buffer_memory_requirements: [device_memory_count]c.VkMemoryRequirements = undefined,
+    buffer_mapping: [buffer_count_max]Slice = initArray(
+        Slice,
+        buffer_count_max,
+        Slice{ .offset = 0, .size = 0 },
+    ),
+    buffer_index_device: usize = 0,
+    buffer_index_staging: usize = 0,
+    buffer_index_uniform: Slice = Slice{ .offset = 0, .size = 0 },
+    buffer_memory_requirements: [buffer_count_max]c.VkMemoryRequirements = undefined,
     device_memory: [device_memory_count]c.VkDeviceMemory = initArray(
         c.VkDeviceMemory,
         device_memory_count,
         null,
     ),
+    device_memory_buffer_index: [device_memory_count]Slice = initArray(
+        Slice,
+        device_memory_count,
+        Slice{ .offset = 0, .size = 0 },
+    ),
+    mapped_memory_ubo: [swapchain_image_count_max]?*anyopaque = initArray(
+        ?*anyopaque,
+        swapchain_image_count_max,
+        null,
+    ),
+    descriptor_pool: c.VkDescriptorPool = null,
+    descriptor_set: [swapchain_image_count_max]c.VkDescriptorSet = initArray(
+        c.VkDescriptorSet,
+        swapchain_image_count_max,
+        null,
+    ),
 
     pub fn kill(self: Vulkan) void {
         _ = c.vkDeviceWaitIdle(self.device);
-        inline for (0..device_memory_count) |index| {
+        self.swapchainKill();
+        for (0..self.buffer_count) |index| {
             c.vkDestroyBuffer(self.device, self.buffer[index], null);
+        }
+        for (0..device_memory_count) |index| {
             c.vkFreeMemory(self.device, self.device_memory[index], null);
         }
-        self.swapchainKill();
-        for (0..swapchain_frame_concurrency) |frame_concurrency_index| {
+        c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
+        c.vkDestroyDescriptorSetLayout(self.device, self.descriptor_set_layout_uniform, null);
+        for (0..self.swapchain_image_count) |swapchain_image_index| {
             for (0..fence_count) |index| {
-                c.vkDestroyFence(self.device, self.fence[frame_concurrency_index][index], null);
+                c.vkDestroyFence(self.device, self.fence[swapchain_image_index][index], null);
             }
             for (0..semaphore_count) |index| {
-                c.vkDestroySemaphore(self.device, self.semaphore[frame_concurrency_index][index], null);
+                c.vkDestroySemaphore(self.device, self.semaphore[swapchain_image_index][index], null);
             }
         }
         for (0..command_pool_count) |index| {
@@ -303,7 +398,6 @@ pub const Vulkan = struct {
         }
         c.vkDestroySwapchainKHR(self.device, self.swapchain, null);
     }
-
     pub fn swapchainInit(self: *Vulkan, comptime initial_init: bool) !void {
         try errCheck(c.vkDeviceWaitIdle(self.device));
 
@@ -442,7 +536,7 @@ pub const Vulkan = struct {
                     .compositeAlpha = c.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
                     .presentMode = self.surface_present_mode[self.surface_present_mode_index_vsync],
                     .clipped = c.VK_TRUE,
-                    // TODO: recreate swapchain on resize
+                    // TODO: recreate swapchain from old swapchain on resize
                     .oldSwapchain = null,
                 };
 
@@ -600,20 +694,42 @@ pub const Vulkan = struct {
                 }
             }
 
+            // create descriptor set layout
+            {
+                try errCheck(c.vkCreateDescriptorSetLayout(
+                    self.device,
+                    &.{
+                        .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                        .pNext = null,
+                        .flags = 0,
+                        .bindingCount = 1,
+                        .pBindings = &.{
+                            .binding = 0,
+                            .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                            .descriptorCount = 1,
+                            .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT,
+                            .pImmutableSamplers = null,
+                        },
+                    },
+                    null,
+                    &self.descriptor_set_layout_uniform,
+                ));
+                std.debug.assert(self.descriptor_set_layout_uniform != null);
+            }
+
             // create pipeline layout
             {
-                const pipeline_layout_create_info = c.VkPipelineLayoutCreateInfo{
-                    .sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-                    .pNext = null,
-                    .flags = 0,
-                    .setLayoutCount = 0,
-                    .pSetLayouts = null,
-                    .pushConstantRangeCount = 0,
-                    .pPushConstantRanges = null,
-                };
                 try errCheck(c.vkCreatePipelineLayout(
                     self.device,
-                    &pipeline_layout_create_info,
+                    &.{
+                        .sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                        .pNext = null,
+                        .flags = 0,
+                        .setLayoutCount = 1,
+                        .pSetLayouts = &self.descriptor_set_layout_uniform,
+                        .pushConstantRangeCount = 0,
+                        .pPushConstantRanges = null,
+                    },
                     null,
                     &self.pipeline_layout,
                 ));
@@ -858,6 +974,50 @@ pub const Vulkan = struct {
             std.debug.assert(swapchain_image_index_draw != int_invalid);
         }
 
+        // update uniform buffer
+        {
+            // std.time.nanoTimestamp();
+            const extent = self.surface_capabilities.currentExtent;
+            const cam_right = m.Vec4{ 1, 0, 0, 0 };
+            const cam_up = m.Vec4{ 0, 1, 0, 0 };
+            const cam_forward = m.Vec4{ 0, 0, 1, 0 };
+            const cam_position = m.Vec4{ 0, 0, 3, 1 };
+            const cam_translation = m.Vec4{
+                -m.dot(cam_position, cam_right),
+                -m.dot(cam_position, cam_up),
+                -m.dot(cam_position, cam_forward),
+                1,
+            };
+            const ubo = UniformBufferObject{
+                .model = m.Mat4{
+                    1, 0, 0, 0,
+                    0, 1, 0, 0,
+                    0, 0, 1, 0,
+                    0, 0, 0, 1,
+                },
+                .view = m.Mat4{
+                    cam_right[0],       cam_up[0],          cam_forward[0],     0,
+                    cam_right[1],       cam_up[1],          cam_forward[1],     0,
+                    cam_right[2],       cam_up[2],          cam_forward[2],     0,
+                    cam_translation[0], cam_translation[1], cam_translation[2], 1,
+                },
+                .proj = m.perspective(
+                    std.math.pi / 4.0,
+                    @as(f32, @floatFromInt(extent.width)) / @as(f32, @floatFromInt(extent.height)),
+                    0.1,
+                    1000,
+                ),
+            };
+            @memcpy(
+                @as(
+                    [*]u8,
+                    @ptrCast(self.mapped_memory_ubo[self.swapchain_frame_index_draw]),
+                ),
+                std.mem.asBytes(&ubo),
+            );
+            std.debug.assert(self.device_memory[device_memory_index_host_staging] != null);
+        }
+
         // NOTE: reset fence once we know we will perform work
         try errCheck(c.vkResetFences(
             self.device,
@@ -865,30 +1025,27 @@ pub const Vulkan = struct {
             &self.fence[self.swapchain_frame_index_draw][self.fence_index_queue_submitted],
         ));
 
-        try errCheck(c.vkResetCommandBuffer(self.command_buffer[self.swapchain_frame_index_draw], 0));
-
         // command render pass
         {
-            {
-                const command_buffer_begin_info = c.VkCommandBufferBeginInfo{
+            const command_buffer = self.command_buffer[self.swapchain_frame_index_draw];
+
+            try errCheck(
+                c.vkResetCommandBuffer(command_buffer, 0),
+            );
+
+            try errCheck(c.vkBeginCommandBuffer(
+                command_buffer,
+                &c.VkCommandBufferBeginInfo{
                     .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                     .pNext = null,
                     .flags = 0,
                     .pInheritanceInfo = null,
-                };
-                try errCheck(c.vkBeginCommandBuffer(
-                    self.command_buffer[self.swapchain_frame_index_draw],
-                    &command_buffer_begin_info,
-                ));
-            }
+                },
+            ));
 
-            {
-                const clear_value = c.VkClearValue{
-                    .color = .{
-                        .float32 = .{ 0, 0, 0, 1 },
-                    },
-                };
-                const render_pass_begin_info = c.VkRenderPassBeginInfo{
+            c.vkCmdBeginRenderPass(
+                command_buffer,
+                &c.VkRenderPassBeginInfo{
                     .sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
                     .pNext = null,
                     .renderPass = self.render_pass,
@@ -898,70 +1055,72 @@ pub const Vulkan = struct {
                         .extent = self.surface_capabilities.currentExtent,
                     },
                     .clearValueCount = 1,
-                    .pClearValues = &clear_value,
-                };
-                c.vkCmdBeginRenderPass(
-                    self.command_buffer[self.swapchain_frame_index_draw],
-                    &render_pass_begin_info,
-                    c.VK_SUBPASS_CONTENTS_INLINE,
-                );
-            }
+                    .pClearValues = &c.VkClearValue{
+                        .color = .{
+                            .float32 = m.Vec4{ 0, 0, 0, 1 },
+                        },
+                    },
+                },
+                c.VK_SUBPASS_CONTENTS_INLINE,
+            );
 
             c.vkCmdBindPipeline(
-                self.command_buffer[self.swapchain_frame_index_draw],
+                command_buffer,
                 c.VK_PIPELINE_BIND_POINT_GRAPHICS,
                 self.pipeline_graphics,
             );
 
-            // set viewport
-            {
-                const viewport = c.VkViewport{
+            c.vkCmdSetViewport(
+                command_buffer,
+                0,
+                1,
+                &c.VkViewport{
                     .x = 0,
                     .y = 0,
                     .width = @floatFromInt(self.surface_capabilities.currentExtent.width),
                     .height = @floatFromInt(self.surface_capabilities.currentExtent.height),
                     .minDepth = 0,
                     .maxDepth = 1,
-                };
-                c.vkCmdSetViewport(
-                    self.command_buffer[self.swapchain_frame_index_draw],
-                    0,
-                    1,
-                    &viewport,
-                );
-            }
+                },
+            );
 
-            // set scissor
-            {
-                const scissor = c.VkRect2D{
-                    .offset = c.VkOffset2D{ .x = 0, .y = 0 },
-                    .extent = self.surface_capabilities.currentExtent,
-                };
-                c.vkCmdSetScissor(
-                    self.command_buffer[self.swapchain_frame_index_draw],
-                    0,
-                    1,
-                    &scissor,
-                );
-            }
-
-            c.vkCmdBindVertexBuffers(
-                self.command_buffer[self.swapchain_frame_index_draw],
+            c.vkCmdSetScissor(
+                command_buffer,
                 0,
                 1,
-                &self.buffer[device_memory_index_device_local],
+                &c.VkRect2D{
+                    .offset = c.VkOffset2D{ .x = 0, .y = 0 },
+                    .extent = self.surface_capabilities.currentExtent,
+                },
+            );
+
+            c.vkCmdBindVertexBuffers(
+                command_buffer,
+                0,
+                1,
+                &self.buffer[self.buffer_index_device],
                 &@as(u64, 0),
             );
 
             c.vkCmdBindIndexBuffer(
-                self.command_buffer[self.swapchain_frame_index_draw],
-                self.buffer[device_memory_index_device_local],
+                command_buffer,
+                self.buffer[self.buffer_index_device],
                 @offsetOf(RenderData, "indices"),
                 c.VK_INDEX_TYPE_UINT16,
             );
 
+            c.vkCmdBindDescriptorSets(
+                command_buffer,
+                c.VK_PIPELINE_BIND_POINT_GRAPHICS,
+                self.pipeline_layout,
+                0,
+                1,
+                &self.descriptor_set[self.swapchain_frame_index_draw],
+                0,
+                null,
+            );
             c.vkCmdDrawIndexed(
-                self.command_buffer[self.swapchain_frame_index_draw],
+                command_buffer,
                 render_data.indices.len,
                 1,
                 0,
@@ -969,35 +1128,31 @@ pub const Vulkan = struct {
                 0,
             );
 
-            c.vkCmdEndRenderPass(self.command_buffer[self.swapchain_frame_index_draw]);
+            c.vkCmdEndRenderPass(command_buffer);
 
-            try errCheck(c.vkEndCommandBuffer(self.command_buffer[self.swapchain_frame_index_draw]));
+            try errCheck(c.vkEndCommandBuffer(command_buffer));
         }
 
-        {
-            const submit_info = c.VkSubmitInfo{
+        try errCheck(c.vkQueueSubmit(
+            self.queue,
+            1,
+            &c.VkSubmitInfo{
                 .sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO,
                 .pNext = null,
                 .waitSemaphoreCount = 1,
                 .pWaitSemaphores = &self.semaphore[self.swapchain_frame_index_draw][self.semaphore_index_surface_image_acquired],
                 .pWaitDstStageMask = &@as(u32, c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT),
                 .commandBufferCount = 1,
-                .pCommandBuffers = &self.command_buffer,
+                .pCommandBuffers = &self.command_buffer[self.swapchain_frame_index_draw],
                 .signalSemaphoreCount = 1,
                 .pSignalSemaphores = &self.semaphore[self.swapchain_frame_index_draw][self.semaphore_index_render_finished],
-            };
-
-            try errCheck(c.vkQueueSubmit(
-                self.queue,
-                1,
-                &submit_info,
-                self.fence[self.swapchain_frame_index_draw][self.fence_index_queue_submitted],
-            ));
-        }
+            },
+            self.fence[self.swapchain_frame_index_draw][self.fence_index_queue_submitted],
+        ));
 
         // presentation
         {
-            const present_info = c.VkPresentInfoKHR{
+            const result = c.vkQueuePresentKHR(self.queue, &c.VkPresentInfoKHR{
                 .sType = c.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
                 .pNext = null,
                 .waitSemaphoreCount = 1,
@@ -1006,9 +1161,7 @@ pub const Vulkan = struct {
                 .pSwapchains = &self.swapchain,
                 .pImageIndices = &swapchain_image_index_draw,
                 .pResults = null,
-            };
-
-            const result = c.vkQueuePresentKHR(self.queue, &present_info);
+            });
 
             switch (result) {
                 c.VK_ERROR_OUT_OF_DATE_KHR => try self.swapchainInit(false),
@@ -1017,7 +1170,7 @@ pub const Vulkan = struct {
             }
         }
 
-        self.swapchain_frame_index_draw = (self.swapchain_frame_index_draw + 1) & swapchain_frame_concurrency;
+        self.swapchain_frame_index_draw = (self.swapchain_frame_index_draw + 1) % self.swapchain_image_count;
     }
 
     pub fn init(self: *Vulkan, ui: xcb.XcbUi) !void {
@@ -1075,48 +1228,46 @@ pub const Vulkan = struct {
         // create instance
         // DOCS: https://docs.vulkan.org/spec/latest/chapters/initialization.html#initialization-instances
         {
-            const application_info = c.VkApplicationInfo{
-                .sType = c.VK_STRUCTURE_TYPE_APPLICATION_INFO,
-                .pApplicationName = "Dwarfare",
-                .applicationVersion = c.VK_MAKE_VERSION(1, 0, 0),
-                .pEngineName = "No Engine",
-                .engineVersion = c.VK_MAKE_VERSION(1, 0, 0),
-                .apiVersion = c.VK_MAKE_VERSION(1, 1, 0),
-            };
-
-            const instance_create_info = c.VkInstanceCreateInfo{
-                .sType = c.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-                .pNext = null,
-                .pApplicationInfo = &application_info,
-                .enabledLayerCount = instance_layer_enable.len,
-                .ppEnabledLayerNames = &instance_layer_enable,
-                .enabledExtensionCount = instance_extension_enable.len,
-                .ppEnabledExtensionNames = &instance_extension_enable,
-            };
-
-            try errCheck(c.vkCreateInstance(&instance_create_info, null, &self.instance));
+            try errCheck(c.vkCreateInstance(
+                &c.VkInstanceCreateInfo{
+                    .sType = c.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+                    .pNext = null,
+                    .pApplicationInfo = &c.VkApplicationInfo{
+                        .sType = c.VK_STRUCTURE_TYPE_APPLICATION_INFO,
+                        .pApplicationName = "Dwarfare",
+                        .applicationVersion = c.VK_MAKE_VERSION(1, 0, 0),
+                        .pEngineName = "No Engine",
+                        .engineVersion = c.VK_MAKE_VERSION(1, 0, 0),
+                        .apiVersion = c.VK_MAKE_VERSION(1, 1, 0),
+                    },
+                    .enabledLayerCount = instance_layer_enable.len,
+                    .ppEnabledLayerNames = &instance_layer_enable,
+                    .enabledExtensionCount = instance_extension_enable.len,
+                    .ppEnabledExtensionNames = &instance_extension_enable,
+                },
+                null,
+                &self.instance,
+            ));
             std.debug.assert(self.instance != null);
         }
 
         // create surface
         if (builtin.os.tag == std.Target.Os.Tag.linux) {
-            var surface_create_info = c.VkXcbSurfaceCreateInfoKHR{
-                .sType = c.VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR,
-                .pNext = null,
-                .flags = 0,
-                .connection = @ptrCast(ui.connection),
-                .window = ui.window,
-            };
-
             try errCheck(c.vkCreateXcbSurfaceKHR(
                 self.instance,
-                &surface_create_info,
+                &c.VkXcbSurfaceCreateInfoKHR{
+                    .sType = c.VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR,
+                    .pNext = null,
+                    .flags = 0,
+                    .connection = @ptrCast(ui.connection),
+                    .window = ui.window,
+                },
                 null,
                 &self.surface,
             ));
             std.debug.assert(self.surface != null);
         } else {
-            unreachable;
+            @compileError("unsupported os");
         }
 
         // query physical devices
@@ -1136,9 +1287,18 @@ pub const Vulkan = struct {
             // fill
             for (0..self.physical_device_count) |index| {
                 const physical_device = self.physical_device[index];
-                c.vkGetPhysicalDeviceProperties(physical_device, &self.physical_device_properties[index]);
-                c.vkGetPhysicalDeviceFeatures(physical_device, &self.physical_device_features[index]);
-                c.vkGetPhysicalDeviceMemoryProperties(physical_device, &self.physical_device_memory_properties[index]);
+                c.vkGetPhysicalDeviceProperties(
+                    physical_device,
+                    &self.physical_device_properties[index],
+                );
+                c.vkGetPhysicalDeviceFeatures(
+                    physical_device,
+                    &self.physical_device_features[index],
+                );
+                c.vkGetPhysicalDeviceMemoryProperties(
+                    physical_device,
+                    &self.physical_device_memory_properties[index],
+                );
             }
 
             // pick
@@ -1224,31 +1384,27 @@ pub const Vulkan = struct {
 
         // create device
         {
-            const device_queue_create_info = c.VkDeviceQueueCreateInfo{
-                .sType = c.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-                .pNext = null,
-                .flags = 0,
-                .queueFamilyIndex = self.queue_family_index_graphics,
-                .queueCount = 1,
-                .pQueuePriorities = &@as(f32, 1.0),
-            };
-
-            const device_create_info = c.VkDeviceCreateInfo{
-                .sType = c.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-                .pNext = null,
-                .flags = 0,
-                .queueCreateInfoCount = 1,
-                .pQueueCreateInfos = &device_queue_create_info,
-                .enabledLayerCount = 0,
-                .ppEnabledLayerNames = null,
-                .enabledExtensionCount = device_extension_enable.len,
-                .ppEnabledExtensionNames = &device_extension_enable,
-                .pEnabledFeatures = null,
-            };
-
             try errCheck(c.vkCreateDevice(
                 self.physical_device[self.physical_device_index_gpu],
-                &device_create_info,
+                &c.VkDeviceCreateInfo{
+                    .sType = c.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+                    .pNext = null,
+                    .flags = 0,
+                    .queueCreateInfoCount = 1,
+                    .pQueueCreateInfos = &c.VkDeviceQueueCreateInfo{
+                        .sType = c.VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                        .pNext = null,
+                        .flags = 0,
+                        .queueFamilyIndex = self.queue_family_index_graphics,
+                        .queueCount = 1,
+                        .pQueuePriorities = &@as(f32, 1.0),
+                    },
+                    .enabledLayerCount = 0,
+                    .ppEnabledLayerNames = null,
+                    .enabledExtensionCount = device_extension_enable.len,
+                    .ppEnabledExtensionNames = &device_extension_enable,
+                    .pEnabledFeatures = null,
+                },
                 null,
                 &self.device,
             ));
@@ -1312,30 +1468,71 @@ pub const Vulkan = struct {
 
         // create buffers
         {
-            const buffer_create_info = [device_memory_count]c.VkBufferCreateInfo{
-                c.VkBufferCreateInfo{
-                    .sType = c.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-                    .pNext = null,
-                    .flags = 0,
-                    .size = @sizeOf(RenderData),
-                    .usage = c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                    .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
-                    .queueFamilyIndexCount = 0,
-                    .pQueueFamilyIndices = null,
-                },
-                c.VkBufferCreateInfo{
-                    .sType = c.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-                    .pNext = null,
-                    .flags = 0,
-                    .size = @sizeOf(RenderData),
-                    .usage = c.VK_BUFFER_USAGE_TRANSFER_DST_BIT | c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | c.VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                    .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
-                    .queueFamilyIndexCount = 0,
-                    .pQueueFamilyIndices = null,
-                },
-            };
+            // setup pointers
+            {
+                // NOTE: required to be laid out grouped by expected memory properties and in the order of matching device_memory_index_*s
 
-            inline for (0..device_memory_count) |index| {
+                // DEVICE_LOCAL
+                std.debug.assert(device_memory_index_device_local == 0);
+                {
+                    self.buffer_index_device = 0;
+                }
+                self.device_memory_buffer_index[device_memory_index_device_local] = Slice{
+                    .offset = 0,
+                    .size = 1,
+                };
+                // HOST_VISIBLE | HOST_COHERENT
+                std.debug.assert(device_memory_index_host_staging == 1);
+                {
+                    self.buffer_index_staging = 1;
+                    self.buffer_index_uniform = Slice{
+                        .offset = 2,
+                        .size = self.swapchain_image_count,
+                    };
+                }
+                self.device_memory_buffer_index[device_memory_index_host_staging] = Slice{
+                    .offset = 1,
+                    .size = 1 + self.swapchain_image_count,
+                };
+                self.buffer_count = 2 + self.swapchain_image_count;
+                std.debug.assert(self.buffer_count <= buffer_count_max);
+            }
+
+            var buffer_create_info: [buffer_count_max]c.VkBufferCreateInfo = undefined;
+            buffer_create_info[self.buffer_index_staging] = c.VkBufferCreateInfo{
+                .sType = c.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                .pNext = null,
+                .flags = 0,
+                .size = @sizeOf(RenderData),
+                .usage = c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
+                .queueFamilyIndexCount = 0,
+                .pQueueFamilyIndices = null,
+            };
+            buffer_create_info[self.buffer_index_device] = c.VkBufferCreateInfo{
+                .sType = c.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                .pNext = null,
+                .flags = 0,
+                .size = @sizeOf(RenderData),
+                .usage = c.VK_BUFFER_USAGE_TRANSFER_DST_BIT | c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | c.VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
+                .queueFamilyIndexCount = 0,
+                .pQueueFamilyIndices = null,
+            };
+            for (0..self.buffer_index_uniform.size) |index| {
+                buffer_create_info[self.buffer_index_uniform.offset + index] = c.VkBufferCreateInfo{
+                    .sType = c.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                    .pNext = null,
+                    .flags = 0,
+                    .size = @sizeOf(UniformBufferObject),
+                    .usage = c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                    .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
+                    .queueFamilyIndexCount = 0,
+                    .pQueueFamilyIndices = null,
+                };
+            }
+
+            for (0..self.buffer_count) |index| {
                 try errCheck(c.vkCreateBuffer(
                     self.device,
                     &buffer_create_info[index],
@@ -1348,47 +1545,77 @@ pub const Vulkan = struct {
 
         // query buffer memory requirements
         {
-            inline for (0..device_memory_count) |index| {
+            std.debug.print("\nBuffers: ({})\n", .{self.buffer_count});
+            for (0..self.buffer_count) |index| {
                 c.vkGetBufferMemoryRequirements(
                     self.device,
                     self.buffer[index],
                     &self.buffer_memory_requirements[index],
                 );
+                const req = self.buffer_memory_requirements[index];
+                std.debug.print("  {}. size:{}, alignment:{}, memoryTypeBits:0b{b}\n", .{
+                    index,
+                    req.size,
+                    req.alignment,
+                    req.memoryTypeBits,
+                });
             }
         }
 
         // allocate memory
         {
             var memory_properties_required: [device_memory_count]u32 = undefined;
-            memory_properties_required[device_memory_index_host_staging] = c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
             memory_properties_required[device_memory_index_device_local] = c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+            memory_properties_required[device_memory_index_host_staging] = c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 
-            inline for (0..device_memory_count) |device_memory_index| {
-                const memory_requirements = self.buffer_memory_requirements[device_memory_index];
-                const properties_required = memory_properties_required[device_memory_index];
+            for (0..device_memory_count) |device_memory_index| {
+                const device_properties_required = memory_properties_required[device_memory_index];
 
-                const memory_type_index: u32 = blk: {
-                    const memory_properties = self.physical_device_memory_properties[self.physical_device_index_gpu];
-                    for (0..memory_properties.memoryTypeCount) |index| {
-                        const memory_type_required = (memory_requirements.memoryTypeBits & std.math.shl(u32, 1, index)) != 0;
-                        const properties_satisfied = (memory_properties.memoryTypes[index].propertyFlags & properties_required) == properties_required;
-                        if (memory_type_required and properties_satisfied) {
-                            break :blk @intCast(index);
-                        }
+                const device_properties = self.physical_device_memory_properties[self.physical_device_index_gpu];
+                std.debug.print("Device memory {}: 0b{b} {}\n", .{
+                    device_memory_index,
+                    device_properties_required,
+                    device_properties.memoryTypeCount,
+                });
+
+                var allocation_size: u64 = 0;
+                var memory_type_index: u32 = 0;
+
+                const buffer_batch = self.device_memory_buffer_index[device_memory_index];
+                for (0..buffer_batch.size) |buffer_index_batch| {
+                    const buffer_index = buffer_batch.offset + buffer_index_batch;
+                    const memory_requirements = self.buffer_memory_requirements[buffer_index];
+                    {
+                        // next aligned memory
+                        const mask = memory_requirements.alignment - 1;
+                        allocation_size = (allocation_size + mask) & ~mask;
                     }
-                    return error.VkMemoryTypeIndexNotFound;
-                };
-
-                const memory_allocate_info = c.VkMemoryAllocateInfo{
-                    .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-                    .pNext = null,
-                    .allocationSize = memory_requirements.size,
-                    .memoryTypeIndex = memory_type_index,
-                };
+                    self.buffer_mapping[buffer_index] = .{
+                        .offset = allocation_size,
+                        .size = memory_requirements.size,
+                    };
+                    allocation_size += memory_requirements.size;
+                    memory_type_index = blk: {
+                        for (0..device_properties.memoryTypeCount) |index| {
+                            const memory_type_required = (memory_requirements.memoryTypeBits & std.math.shl(u32, 1, index)) != 0;
+                            const properties_satisfied = (device_properties.memoryTypes[index].propertyFlags & device_properties_required) == device_properties_required;
+                            if (memory_type_required and properties_satisfied) {
+                                break :blk @intCast(index);
+                            }
+                        }
+                        return error.VkMemoryTypeIndexNotFound;
+                    };
+                }
+                std.debug.print("allocation size: {}\n", .{allocation_size});
 
                 try errCheck(c.vkAllocateMemory(
                     self.device,
-                    &memory_allocate_info,
+                    &c.VkMemoryAllocateInfo{
+                        .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                        .pNext = null,
+                        .allocationSize = allocation_size,
+                        .memoryTypeIndex = memory_type_index,
+                    },
                     null,
                     &self.device_memory[device_memory_index],
                 ));
@@ -1398,30 +1625,34 @@ pub const Vulkan = struct {
 
         // bind buffer memory
         {
-            inline for (0..device_memory_count) |index| {
-                try errCheck(c.vkBindBufferMemory(
-                    self.device,
-                    self.buffer[index],
-                    self.device_memory[index],
-                    0,
-                ));
+            inline for (0..device_memory_count) |device_memory_index| {
+                const buffer_batch = self.device_memory_buffer_index[device_memory_index];
+                for (0..buffer_batch.size) |buffer_index_batch| {
+                    const buffer_index = buffer_batch.offset + buffer_index_batch;
+                    try errCheck(c.vkBindBufferMemory(
+                        self.device,
+                        self.buffer[buffer_index],
+                        self.device_memory[device_memory_index],
+                        self.buffer_mapping[buffer_index].offset,
+                    ));
+                }
             }
         }
 
         // write draw buffer to device staging memory
         {
-            const size = @sizeOf(RenderData);
+            const mapping = self.buffer_mapping[self.buffer_index_staging];
             var data: ?*anyopaque = null;
             try errCheck(c.vkMapMemory(
                 self.device,
                 self.device_memory[device_memory_index_host_staging],
-                0,
-                size,
+                mapping.offset,
+                mapping.size,
                 0,
                 &data,
             ));
             std.debug.assert(data != null);
-            @memcpy(@as(*[size]u8, @ptrCast(data)), std.mem.asBytes(&render_data));
+            @memcpy(@as([*]u8, @ptrCast(@alignCast(data))), std.mem.asBytes(&render_data));
             c.vkUnmapMemory(self.device, self.device_memory[device_memory_index_host_staging]);
         }
 
@@ -1431,7 +1662,7 @@ pub const Vulkan = struct {
             {
                 try errCheck(c.vkAllocateCommandBuffers(
                     self.device,
-                    &.{
+                    &c.VkCommandBufferAllocateInfo{
                         .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
                         .pNext = null,
                         .commandPool = self.command_pool[command_pool_index_staging],
@@ -1445,7 +1676,7 @@ pub const Vulkan = struct {
 
             try errCheck(c.vkBeginCommandBuffer(
                 command_buffer,
-                &.{
+                &c.VkCommandBufferBeginInfo{
                     .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                     .pNext = null,
                     .flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
@@ -1453,15 +1684,17 @@ pub const Vulkan = struct {
                 },
             ));
 
+            std.debug.assert(self.buffer_mapping[self.buffer_index_staging].size ==
+                self.buffer_mapping[self.buffer_index_device].size);
             c.vkCmdCopyBuffer(
                 command_buffer,
-                self.buffer[device_memory_index_host_staging],
-                self.buffer[device_memory_index_device_local],
+                self.buffer[self.buffer_index_staging],
+                self.buffer[self.buffer_index_device],
                 1,
                 &.{
                     .srcOffset = 0,
                     .dstOffset = 0,
-                    .size = @sizeOf(RenderData),
+                    .size = self.buffer_mapping[self.buffer_index_staging].size,
                 },
             );
 
@@ -1493,23 +1726,110 @@ pub const Vulkan = struct {
             );
         }
 
+        // persistent mapping of uniforms
+        {
+            const mapping = self.buffer_mapping[self.buffer_index_uniform.offset];
+            try errCheck(c.vkMapMemory(
+                self.device,
+                self.device_memory[device_memory_index_host_staging],
+                mapping.offset,
+                mapping.size * self.buffer_index_uniform.size,
+                0,
+                &self.mapped_memory_ubo[0],
+            ));
+            std.debug.assert(self.mapped_memory_ubo[0] != null);
+            for (1..self.swapchain_image_count) |index| {
+                self.mapped_memory_ubo[index] = @ptrFromInt(@intFromPtr(self.mapped_memory_ubo[0].?) + index * mapping.size);
+            }
+        }
+
         // allocate swapchain command buffers
         {
-            const command_buffer_allocate_info = c.VkCommandBufferAllocateInfo{
-                .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-                .pNext = null,
-                .commandPool = self.command_pool[command_pool_index_swapchain],
-                .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-                .commandBufferCount = swapchain_frame_concurrency,
-            };
-
             try errCheck(c.vkAllocateCommandBuffers(
                 self.device,
-                &command_buffer_allocate_info,
+                &c.VkCommandBufferAllocateInfo{
+                    .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                    .pNext = null,
+                    .commandPool = self.command_pool[command_pool_index_swapchain],
+                    .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                    .commandBufferCount = self.swapchain_image_count,
+                },
                 &self.command_buffer,
             ));
-            for (0..swapchain_frame_concurrency) |frame_index| {
-                std.debug.assert(self.command_buffer[frame_index] != null);
+            for (0..self.swapchain_image_count) |index| {
+                std.debug.assert(self.command_buffer[index] != null);
+            }
+        }
+
+        // create descriptor pool
+        {
+            try errCheck(c.vkCreateDescriptorPool(
+                self.device,
+                &c.VkDescriptorPoolCreateInfo{
+                    .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+                    .poolSizeCount = 1,
+                    .pPoolSizes = &c.VkDescriptorPoolSize{
+                        .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                        .descriptorCount = self.swapchain_image_count,
+                    },
+                    .maxSets = self.swapchain_image_count,
+                },
+                null,
+                &self.descriptor_pool,
+            ));
+            std.debug.assert(self.descriptor_pool != null);
+        }
+
+        // allocate descriptor sets
+        {
+            var layouts: [swapchain_image_count_max]c.VkDescriptorSetLayout = undefined;
+            for (0..self.swapchain_image_count) |index| {
+                layouts[index] = self.descriptor_set_layout_uniform;
+            }
+            try errCheck(c.vkAllocateDescriptorSets(
+                self.device,
+                &c.VkDescriptorSetAllocateInfo{
+                    .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                    .pNext = null,
+                    .descriptorPool = self.descriptor_pool,
+                    .descriptorSetCount = self.swapchain_image_count,
+                    .pSetLayouts = &layouts,
+                },
+                &self.descriptor_set,
+            ));
+            for (0..self.swapchain_image_count) |index| {
+                std.debug.assert(self.descriptor_set[index] != null);
+            }
+        }
+
+        // populate descriptor sets
+        {
+            for (0..self.swapchain_image_count) |index| {
+                const descriptor_write = [1]c.VkWriteDescriptorSet{
+                    c.VkWriteDescriptorSet{
+                        .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                        .pNext = null,
+                        .dstSet = self.descriptor_set[index],
+                        .dstBinding = 0,
+                        .dstArrayElement = 0,
+                        .descriptorCount = 1,
+                        .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                        .pImageInfo = null,
+                        .pBufferInfo = &c.VkDescriptorBufferInfo{
+                            .buffer = self.buffer[self.buffer_index_uniform.offset + index],
+                            .offset = 0,
+                            .range = self.buffer_mapping[self.buffer_index_uniform.offset + index].size,
+                        },
+                        .pTexelBufferView = null,
+                    },
+                };
+                c.vkUpdateDescriptorSets(
+                    self.device,
+                    descriptor_write.len,
+                    &descriptor_write,
+                    0,
+                    null,
+                );
             }
         }
 
@@ -1521,15 +1841,15 @@ pub const Vulkan = struct {
                 .flags = 0,
             };
 
-            inline for (0..swapchain_frame_concurrency) |frame_concurrency_index| {
+            for (0..self.swapchain_image_count) |swapchain_image_index| {
                 inline for (0..semaphore_count) |index| {
                     try errCheck(c.vkCreateSemaphore(
                         self.device,
                         &semaphore_create_info,
                         null,
-                        &self.semaphore[frame_concurrency_index][index],
+                        &self.semaphore[swapchain_image_index][index],
                     ));
-                    std.debug.assert(self.semaphore[frame_concurrency_index][index] != null);
+                    std.debug.assert(self.semaphore[swapchain_image_index][index] != null);
                 }
             }
         }
@@ -1542,15 +1862,15 @@ pub const Vulkan = struct {
                 .flags = c.VK_FENCE_CREATE_SIGNALED_BIT,
             };
 
-            inline for (0..swapchain_frame_concurrency) |frame_concurrency_index| {
+            for (0..self.swapchain_image_count) |swapchain_image_index| {
                 inline for (0..fence_count) |index| {
                     try errCheck(c.vkCreateFence(
                         self.device,
                         &fence_create_info,
                         null,
-                        &self.fence[frame_concurrency_index][index],
+                        &self.fence[swapchain_image_index][index],
                     ));
-                    std.debug.assert(self.fence[frame_concurrency_index][index] != null);
+                    std.debug.assert(self.fence[swapchain_image_index][index] != null);
                 }
             }
         }
