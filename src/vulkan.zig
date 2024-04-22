@@ -1585,11 +1585,11 @@ pub const Vulkan = struct {
                 for (0..buffer_batch.size) |buffer_index_batch| {
                     const buffer_index = buffer_batch.offset + buffer_index_batch;
                     const memory_requirements = self.buffer_memory_requirements[buffer_index];
-                    {
-                        // next aligned memory
-                        const mask = memory_requirements.alignment - 1;
-                        allocation_size = (allocation_size + mask) & ~mask;
-                    }
+                    allocation_size = std.mem.alignForward(
+                        usize,
+                        allocation_size,
+                        memory_requirements.alignment,
+                    );
                     self.buffer_mapping[buffer_index] = .{
                         .offset = allocation_size,
                         .size = memory_requirements.size,

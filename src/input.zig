@@ -2,51 +2,68 @@ const std = @import("std");
 
 pub const KeyEvent = enum(u8) { down, up, press, release };
 
-pub const Binding = struct {
-    pub const Predicate = union(enum) {
-        pub const Physical = struct {
-            event: KeyEvent,
-            key: u8,
+pub const Predicate = union(enum) {
+    pub const Physical = struct {
+        event: KeyEvent,
+        key: u8,
 
-            fn check(self: Physical, keys: Input.Keys) bool {
-                const index = self.key;
-                return switch (self.event) {
-                    .down => keys.down(index),
-                    .up => keys.up(index),
-                    .press => keys.pressed(index),
-                    .release => keys.released(index),
-                };
-            }
-        };
-
-        const Wm = struct {
-            event: Input.Wm.Event,
-
-            fn check(self: Wm, wm: Input.Wm) bool {
-                return (wm.flags & @intFromEnum(self.event)) != 0;
-            }
-        };
-
-        physical: Physical,
-        wm: Wm,
-        none: struct {},
-
-        fn check(self: Predicate, input: Input) bool {
-            return switch (self) {
-                .physical => |e| e.check(input.keys),
-                .wm => |e| e.check(input.wm),
-                .none => false,
+        fn check(self: Physical, keys: Input.Keys) bool {
+            const index = self.key;
+            return switch (self.event) {
+                .down => keys.down(index),
+                .up => keys.up(index),
+                .press => keys.pressed(index),
+                .release => keys.released(index),
             };
         }
     };
 
-    main: Predicate = .none,
-    alt: Predicate = .none,
+    const Wm = struct {
+        event: Input.Wm.Event,
 
-    pub fn check(self: @This(), input: Input) bool {
-        return self.main.check(input) or self.alt.check(input);
+        fn check(self: Wm, wm: Input.Wm) bool {
+            return (wm.flags & @intFromEnum(self.event)) != 0;
+        }
+    };
+
+    physical: Physical,
+    wm: Wm,
+    none: struct {},
+
+    fn check(self: Predicate, input: Input) bool {
+        return switch (self) {
+            .physical => |e| e.check(input.keys),
+            .wm => |e| e.check(input.wm),
+            .none => false,
+        };
     }
 };
+
+pub fn phys(id: u8, event: KeyEvent) Predicate {
+    return .{ .physical = .{ .event = event, .key = id } };
+}
+
+pub fn Binding(comptime Action: type) type {
+    return struct {
+        const Self = @This();
+
+        action: Action,
+        main: Predicate,
+        alt: Predicate,
+
+        pub fn init(action: Action, main: Predicate, alt: Predicate) Self {
+            return Self{
+                .action = action,
+                .main = main,
+                .alt = alt,
+            };
+        }
+
+        pub fn check(self: Self, input: Input) bool {
+            return self.main.check(input) or self.alt.check(input);
+        }
+    };
+}
 
 pub const Input = struct {
     pub const Wm = struct {

@@ -177,7 +177,7 @@ pub const Synth = struct {
         for (&self.voice) |*voice| {
             for (&voice.phases, 0..) |*phase, phase_index| {
                 const t = timbre[voice.timbre_index];
-                amplitude += wavetable_square.read(phase.*) *
+                amplitude += wavetable_sine.read(phase.*) *
                     t.velocities[phase_index] *
                     voice.state.sample(time_delta);
                 phase.* = std.math.modf(phase.* +

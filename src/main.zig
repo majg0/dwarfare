@@ -3,139 +3,184 @@ const alsa = @import("alsa.zig");
 const xcb = @import("xcb.zig");
 const vk = @import("vulkan.zig");
 const inp = @import("input.zig");
+const Timer = @import("Timer.zig");
+const CircularBuffer = @import("CircularBuffer.zig");
+
+const State = struct {
+    timer_update: Timer,
+    ui: xcb.XcbUi,
+    gpu: vk.Vulkan,
+    sound: alsa.Alsa,
+};
 
 const Action = enum(u8) {
     exit,
+    c4on,
+    c4off,
+    cs4on,
+    cs4off,
+    d4on,
+    d4off,
+    ds4on,
+    ds4off,
+    e4on,
+    e4off,
+    f4on,
+    f4off,
+    fs4on,
+    fs4off,
+    g4on,
+    g4off,
+    gs4on,
+    gs4off,
+    a4on,
+    a4off,
+    as4on,
+    as4off,
+    b4on,
+    b4off,
+    c5on,
+    c5off,
+    octave_prev,
+    octave_next,
+    recording_start,
+    recording_stop,
+    recording_playback,
+    max_invalid,
 };
 
-const Bindings = struct {
-    main: struct {
-        exit: inp.Binding,
-        play: struct {
-            c4on: inp.Binding,
-            c4off: inp.Binding,
-            cs4on: inp.Binding,
-            cs4off: inp.Binding,
-            d4on: inp.Binding,
-            d4off: inp.Binding,
-            ds4on: inp.Binding,
-            ds4off: inp.Binding,
-            e4on: inp.Binding,
-            e4off: inp.Binding,
-            f4on: inp.Binding,
-            f4off: inp.Binding,
-            fs4on: inp.Binding,
-            fs4off: inp.Binding,
-            g4on: inp.Binding,
-            g4off: inp.Binding,
-            gs4on: inp.Binding,
-            gs4off: inp.Binding,
-            a4on: inp.Binding,
-            a4off: inp.Binding,
-            as4on: inp.Binding,
-            as4off: inp.Binding,
-            b4on: inp.Binding,
-            b4off: inp.Binding,
-            c5on: inp.Binding,
-            c5off: inp.Binding,
-            octave_prev: inp.Binding,
-            octave_next: inp.Binding,
-        },
-    },
+const FrameEvent = union(enum) {
+    start: u64,
+    tick: u64,
+    action: Action,
 };
 
-fn key(id: u8, event: inp.KeyEvent) inp.Binding {
-    return .{
-        .main = .{ .physical = .{ .event = event, .key = id } },
-        .alt = .{ .none = .{} },
+const ActionBinding = inp.Binding(Action);
+
+const Actions = struct {
+    const count: usize = @intFromEnum(Action.max_invalid);
+
+    bindings: [count]ActionBinding,
+
+    pub fn init() Actions {
+        var self = Actions{ .bindings = undefined };
+        for (&self.bindings, 0..) |*binding, index| {
+            binding.* = ActionBinding.init(@enumFromInt(index), .none, .none);
+        }
+        return self;
+    }
+
+    pub fn check(self: *Actions, action: Action, input: inp.Input) bool {
+        return self.bindings[@intFromEnum(action)].check(input);
+    }
+
+    pub fn bind(self: *Actions, action: Action, predicate: inp.Predicate) void {
+        self.bindings[@intFromEnum(action)].main = predicate;
+    }
+
+    pub fn bindAlt(self: *Actions, action: Action, predicate: inp.Predicate) void {
+        self.bindings[@intFromEnum(action)].alt = predicate;
+    }
+};
+
+const Recording = struct {
+    const RecordingState = enum {
+        off,
+        recording,
+        playing,
     };
-}
+
+    action_buffer: CircularBuffer.CircularBuffer(FrameEvent, 1024),
+    state: RecordingState,
+    playback_tick_offset: u64,
+
+    pub fn init() Recording {
+        var self: Recording = undefined;
+        self.action_buffer.init();
+        self.state = .off;
+        self.playback_tick_offset = 0;
+        return self;
+    }
+};
 
 pub fn main() !void {
-    // NOTE: this avoids the lack of line break from `zig build run` output
     std.debug.print("\n=== Dwarfare ===\n", .{});
 
-    // TODO: init configuration system first, then choose other systems based on it; e.g. skipping ui on a dedicated server
+    var actions = Actions.init();
 
-    const bindings = blk: {
+    blk: {
         if (std.fs.cwd().openFileZ("input.dat", .{})) |file| {
             defer file.close();
-            var binding: Bindings = undefined;
-            const size = try file.readAll(std.mem.asBytes(&binding));
-            if (size == @sizeOf(Bindings)) {
-                break :blk binding;
+            const size_bytes = try file.readAll(std.mem.asBytes(&actions));
+            if (size_bytes == @sizeOf(Actions)) {
+                break :blk;
             }
         } else |_| {}
         {
-            const binding = Bindings{
-                .main = .{
-                    .exit = .{
-                        .main = .{ .physical = .{ .event = .press, .key = 9 } },
-                        .alt = .{ .wm = .{ .event = .delete } },
-                    },
-                    .play = .{
-                        .c4on = key(38, .press),
-                        .c4off = key(38, .release),
-                        .cs4on = key(25, .press),
-                        .cs4off = key(25, .release),
-                        .d4on = key(39, .press),
-                        .d4off = key(39, .release),
-                        .ds4on = key(26, .press),
-                        .ds4off = key(26, .release),
-                        .e4on = key(40, .press),
-                        .e4off = key(40, .release),
-                        .f4on = key(41, .press),
-                        .f4off = key(41, .release),
-                        .fs4on = key(28, .press),
-                        .fs4off = key(28, .release),
-                        .g4on = key(42, .press),
-                        .g4off = key(42, .release),
-                        .gs4on = key(29, .press),
-                        .gs4off = key(29, .release),
-                        .a4on = key(43, .press),
-                        .a4off = key(43, .release),
-                        .as4on = key(30, .press),
-                        .as4off = key(30, .release),
-                        .b4on = key(44, .press),
-                        .b4off = key(44, .release),
-                        .c5on = key(45, .press),
-                        .c5off = key(45, .release),
-                        .octave_prev = key(24, .press),
-                        .octave_next = key(27, .press),
-                    },
-                },
-            };
+            const phys = inp.phys;
+            actions.bind(.exit, phys(9, .press));
+            actions.bindAlt(.exit, .{ .wm = .{ .event = .delete } });
+            actions.bind(.c4on, phys(38, .press));
+            actions.bind(.c4off, phys(38, .release));
+            actions.bind(.cs4on, phys(25, .press));
+            actions.bind(.cs4off, phys(25, .release));
+            actions.bind(.d4on, phys(39, .press));
+            actions.bind(.d4off, phys(39, .release));
+            actions.bind(.ds4on, phys(26, .press));
+            actions.bind(.ds4off, phys(26, .release));
+            actions.bind(.e4on, phys(40, .press));
+            actions.bind(.e4off, phys(40, .release));
+            actions.bind(.f4on, phys(41, .press));
+            actions.bind(.f4off, phys(41, .release));
+            actions.bind(.fs4on, phys(28, .press));
+            actions.bind(.fs4off, phys(28, .release));
+            actions.bind(.g4on, phys(42, .press));
+            actions.bind(.g4off, phys(42, .release));
+            actions.bind(.gs4on, phys(29, .press));
+            actions.bind(.gs4off, phys(29, .release));
+            actions.bind(.a4on, phys(43, .press));
+            actions.bind(.a4off, phys(43, .release));
+            actions.bind(.as4on, phys(30, .press));
+            actions.bind(.as4off, phys(30, .release));
+            actions.bind(.b4on, phys(44, .press));
+            actions.bind(.b4off, phys(44, .release));
+            actions.bind(.c5on, phys(45, .press));
+            actions.bind(.c5off, phys(45, .release));
+            actions.bind(.octave_prev, phys(24, .press));
+            actions.bind(.octave_next, phys(27, .press));
+            actions.bind(.recording_start, phys(10, .press));
+            actions.bind(.recording_stop, phys(10, .press));
+            actions.bind(.recording_playback, phys(65, .press));
 
             try std.fs.cwd().writeFile2(.{
                 .sub_path = "input.dat",
-                .data = std.mem.asBytes(&binding),
+                .data = std.mem.asBytes(&actions),
                 .flags = .{},
             });
-
-            break :blk binding;
         }
-    };
+    }
 
-    var ui = xcb.XcbUi{};
-    try ui.init();
-    defer ui.kill();
+    var state: State = undefined;
+    try Timer.init(&state.timer_update, 60);
 
-    var gpu = vk.Vulkan{};
-    try gpu.init(ui);
-    defer gpu.kill();
+    state.ui = xcb.XcbUi{};
+    try state.ui.init();
+    defer state.ui.kill();
 
-    var sound = try alsa.init();
-    defer sound.kill();
+    state.gpu = vk.Vulkan{};
+    try state.gpu.init(state.ui);
+    defer state.gpu.kill();
 
-    sound.master_volume = 0.5;
+    state.sound = try alsa.init();
+    defer state.sound.kill();
 
-    var should_run = true;
+    state.sound.master_volume = 0.5;
 
     var input = inp.Input{};
 
     var octave: f64 = 1;
 
-    const KeyState = struct {
+    const KeyVoices = struct {
         c4: usize = 0,
         cs4: usize = 0,
         d4: usize = 0,
@@ -150,64 +195,155 @@ pub fn main() !void {
         b4: usize = 0,
         c5: usize = 0,
     };
-    var key_state = KeyState{};
+    var key_voices = KeyVoices{};
 
-    while (should_run) {
-        defer input.frameConsume();
-        ui.eventsPoll(&input);
+    var recording = Recording.init();
 
-        if (bindings.main.exit.check(input)) {
-            should_run = false;
-            break;
+    loop: while (true) {
+        // 1. read events while converting into actions
+        state.ui.eventsPoll(&input);
+
+        try state.timer_update.accumulate_duration();
+        while (state.timer_update.canTick()) {
+            // 2. read actions
+            defer input.frameConsume();
+            defer state.timer_update.tick();
+
+            if (actions.check(.exit, input)) {
+                break :loop;
+            }
+
+            // state transition
+            switch (recording.state) {
+                .off => {
+                    if (actions.check(.recording_start, input)) {
+                        recording.state = .recording;
+                        std.debug.print("recording started\n", .{});
+                        try recording.action_buffer.write(.{ .start = state.timer_update.frame_index });
+                    }
+                    if (actions.check(.recording_playback, input)) {
+                        recording.state = .playing;
+                        recording.action_buffer.head_r = 0;
+                        std.debug.print("test {any}", .{recording.action_buffer.value[0..128]});
+                        std.debug.print("recording playback started\n", .{});
+                    }
+                },
+                .recording => {
+                    if (actions.check(.recording_stop, input)) {
+                        recording.state = .off;
+                        std.debug.print("recording stopped\n", .{});
+                    }
+                },
+                else => {},
+            }
+
+            // state evaluate
+            switch (recording.state) {
+                .recording => {
+                    const tick = .{ .tick = state.timer_update.frame_index };
+                    if (recording.action_buffer.peek_w()) |event| {
+                        if (event != .tick) {
+                            recording.action_buffer.write(tick) catch {
+                                recording.state = .off;
+                                std.debug.print("recording stopped\n", .{});
+                            };
+                        } else {
+                            try recording.action_buffer.rewrite(tick);
+                        }
+                    }
+                    for (actions.bindings) |binding| {
+                        // TODO: turning the action enum into a union(enum) could help against `and`s here; consider size implications
+                        if (binding.check(input) and
+                            binding.action != .recording_start and
+                            binding.action != .recording_stop and
+                            binding.action != .recording_playback)
+                        {
+                            try recording.action_buffer.write(.{ .action = binding.action });
+                            std.debug.print("recording {}\n", .{binding.action});
+                        }
+                    }
+                },
+                .playing => {
+                    blk: {
+                        while (recording.action_buffer.peek()) |event| {
+                            switch (event) {
+                                .start => |tick| {
+                                    recording.playback_tick_offset = state.timer_update.frame_index - tick;
+                                    try recording.action_buffer.consume();
+                                },
+                                .tick => |tick| {
+                                    if (state.timer_update.frame_index - recording.playback_tick_offset != tick) {
+                                        // not ready
+                                        break :blk;
+                                    }
+                                    try recording.action_buffer.consume();
+                                    std.debug.print("t{} f{} o{}\n", .{ tick, state.timer_update.frame_index, recording.playback_tick_offset });
+                                    // keep reading this frame
+                                },
+                                .action => |action| {
+                                    std.debug.print("action {any}\n", .{action});
+                                    switch (action) {
+                                        .c4on => key_voices.c4 = state.sound.synth.voice_start(261.63 * octave),
+                                        .c4off => state.sound.synth.voice_end(key_voices.c4),
+                                        else => {},
+                                    }
+                                    try recording.action_buffer.consume();
+                                },
+                            }
+                        }
+
+                        recording.state = .off;
+                        std.debug.print("recording playback stopped\n", .{});
+                    }
+                },
+                else => {},
+            }
+
+            for (actions.bindings) |binding| {
+                if (binding.check(input)) {
+                    std.debug.print("f{}\n", .{state.timer_update.frame_index});
+                    switch (binding.action) {
+                        .c4on => key_voices.c4 = state.sound.synth.voice_start(261.63 * octave),
+                        .c4off => state.sound.synth.voice_end(key_voices.c4),
+                        .cs4on => key_voices.cs4 = state.sound.synth.voice_start(277.18 * octave),
+                        .cs4off => state.sound.synth.voice_end(key_voices.cs4),
+                        .d4on => key_voices.d4 = state.sound.synth.voice_start(293.66 * octave),
+                        .d4off => state.sound.synth.voice_end(key_voices.d4),
+                        .ds4on => key_voices.ds4 = state.sound.synth.voice_start(311.13 * octave),
+                        .ds4off => state.sound.synth.voice_end(key_voices.ds4),
+                        .e4on => key_voices.e4 = state.sound.synth.voice_start(329.63 * octave),
+                        .e4off => state.sound.synth.voice_end(key_voices.e4),
+                        .f4on => key_voices.f4 = state.sound.synth.voice_start(349.23 * octave),
+                        .f4off => state.sound.synth.voice_end(key_voices.f4),
+                        .fs4on => key_voices.fs4 = state.sound.synth.voice_start(369.99 * octave),
+                        .fs4off => state.sound.synth.voice_end(key_voices.fs4),
+                        .g4on => key_voices.g4 = state.sound.synth.voice_start(392.00 * octave),
+                        .g4off => state.sound.synth.voice_end(key_voices.g4),
+                        .gs4on => key_voices.gs4 = state.sound.synth.voice_start(415.30 * octave),
+                        .gs4off => state.sound.synth.voice_end(key_voices.gs4),
+                        .a4on => key_voices.a4 = state.sound.synth.voice_start(440.00 * octave),
+                        .a4off => state.sound.synth.voice_end(key_voices.a4),
+                        .as4on => key_voices.as4 = state.sound.synth.voice_start(466.16 * octave),
+                        .as4off => state.sound.synth.voice_end(key_voices.as4),
+                        .b4on => key_voices.b4 = state.sound.synth.voice_start(493.88 * octave),
+                        .b4off => state.sound.synth.voice_end(key_voices.b4),
+                        .c5on => key_voices.c5 = state.sound.synth.voice_start(523.25 * octave),
+                        .c5off => state.sound.synth.voice_end(key_voices.c5),
+                        .octave_prev => octave *= 0.5,
+                        .octave_next => octave *= 2,
+                        else => {},
+                    }
+                }
+            }
         }
-
-        // const freq_base = 440;
-        // const octave_size = 2;
-        // const index = 3;
-        // var scale: [12]f64 = undefined;
-        // inline for (&scale, 0..) |*step, i| {
-        //     const len: f64 = @floatFromInt(scale.len);
-        //     const ind: f64 = @floatFromInt(i);
-        //     step.* = ind / len;
-        // }
-        // const offset: f64 = @floatFromInt(index / scale.len);
-        // sound.freq = freq_base * std.math.pow(f64, octave_size, offset + scale[index % scale.len]);
-        if (bindings.main.play.c4on.check(input)) key_state.c4 = sound.synth.voice_start(261.63 * octave);
-        if (bindings.main.play.c4off.check(input)) sound.synth.voice_end(key_state.c4);
-        if (bindings.main.play.cs4on.check(input)) key_state.cs4 = sound.synth.voice_start(277.18 * octave);
-        if (bindings.main.play.cs4off.check(input)) sound.synth.voice_end(key_state.cs4);
-        if (bindings.main.play.d4on.check(input)) key_state.d4 = sound.synth.voice_start(293.66 * octave);
-        if (bindings.main.play.d4off.check(input)) sound.synth.voice_end(key_state.d4);
-        if (bindings.main.play.ds4on.check(input)) key_state.ds4 = sound.synth.voice_start(311.13 * octave);
-        if (bindings.main.play.ds4off.check(input)) sound.synth.voice_end(key_state.ds4);
-        if (bindings.main.play.e4on.check(input)) key_state.e4 = sound.synth.voice_start(329.63 * octave);
-        if (bindings.main.play.e4off.check(input)) sound.synth.voice_end(key_state.e4);
-        if (bindings.main.play.f4on.check(input)) key_state.f4 = sound.synth.voice_start(349.23 * octave);
-        if (bindings.main.play.f4off.check(input)) sound.synth.voice_end(key_state.f4);
-        if (bindings.main.play.fs4on.check(input)) key_state.fs4 = sound.synth.voice_start(369.99 * octave);
-        if (bindings.main.play.fs4off.check(input)) sound.synth.voice_end(key_state.fs4);
-        if (bindings.main.play.g4on.check(input)) key_state.g4 = sound.synth.voice_start(392.00 * octave);
-        if (bindings.main.play.g4off.check(input)) sound.synth.voice_end(key_state.g4);
-        if (bindings.main.play.gs4on.check(input)) key_state.gs4 = sound.synth.voice_start(415.30 * octave);
-        if (bindings.main.play.gs4off.check(input)) sound.synth.voice_end(key_state.gs4);
-        if (bindings.main.play.a4on.check(input)) key_state.a4 = sound.synth.voice_start(440.00 * octave);
-        if (bindings.main.play.a4off.check(input)) sound.synth.voice_end(key_state.a4);
-        if (bindings.main.play.as4on.check(input)) key_state.as4 = sound.synth.voice_start(466.16 * octave);
-        if (bindings.main.play.as4off.check(input)) sound.synth.voice_end(key_state.as4);
-        if (bindings.main.play.b4on.check(input)) key_state.b4 = sound.synth.voice_start(493.88 * octave);
-        if (bindings.main.play.b4off.check(input)) sound.synth.voice_end(key_state.b4);
-        if (bindings.main.play.c5on.check(input)) key_state.c5 = sound.synth.voice_start(523.25 * octave);
-        if (bindings.main.play.c5off.check(input)) sound.synth.voice_end(key_state.c5);
-        if (bindings.main.play.octave_prev.check(input)) octave *= 0.5;
-        if (bindings.main.play.octave_next.check(input)) octave *= 2;
 
         if ((input.wm.flags & @intFromEnum(inp.Input.Wm.Event.resize)) != 0) {
-            try gpu.swapchainInit(false);
+            try state.gpu.swapchainInit(false);
         }
 
-        try gpu.frameDraw();
+        try state.gpu.frameDraw();
 
-        try sound.update();
+        try state.sound.update();
     }
 
     std.debug.print("exited cleanly\n", .{});

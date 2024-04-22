@@ -4,9 +4,9 @@ const c = @cImport({
     @cInclude("alsa/asoundlib.h");
 });
 
-const frames_per_second = 50;
+const frames_per_second = 500;
 
-const AlsaAudio = struct {
+pub const Alsa = struct {
     audio_data: []u8,
     pcm_handle: ?*c.snd_pcm_t,
     samples_tot: usize,
@@ -19,11 +19,11 @@ const AlsaAudio = struct {
     master_volume: f64,
     synth: synth.Synth = .{},
 
-    pub fn kill(self: *AlsaAudio) void {
+    pub fn kill(self: *Alsa) void {
         self.arena.deinit();
         err_check(c.snd_pcm_close(self.pcm_handle)) catch {};
     }
-    pub fn update(self: *AlsaAudio) !void {
+    pub fn update(self: *Alsa) !void {
         const time_delta = 1.0 / @as(f64, @floatFromInt(self.sample_rate));
 
         while (true) {
@@ -122,7 +122,7 @@ fn err_check(result: c_int) !void {
     }
 }
 
-pub fn init() !AlsaAudio {
+pub fn init() !Alsa {
     std.debug.print("\n=== ALSA ===\n", .{});
 
     // TODO: move this out to a global pre-alloc
@@ -258,7 +258,7 @@ pub fn init() !AlsaAudio {
     // avoid initial "click"
     try err_check(c.snd_pcm_format_set_silence(format, audio_data.ptr, @truncate(frame_size)));
 
-    return AlsaAudio{
+    return Alsa{
         .audio_data = audio_data,
         .pcm_handle = pcm_handle,
         .samples_tot = 0,
