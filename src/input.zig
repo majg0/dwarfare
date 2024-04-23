@@ -1,5 +1,32 @@
 const std = @import("std");
 
+pub fn InputBindings(comptime ActionEnum: type) type {
+    return struct {
+        const Self = @This();
+        const count: usize = @intFromEnum(ActionEnum.max_invalid);
+
+        actions: [count]Binding(ActionEnum),
+
+        pub fn init(self: *Self) void {
+            for (&self.actions, 0..) |*binding, index| {
+                binding.* = Binding(ActionEnum).init(@enumFromInt(index), .none, .none);
+            }
+        }
+
+        pub fn check(self: *Self, action: ActionEnum, input: Input) bool {
+            return self.actions[@intFromEnum(action)].check(input);
+        }
+
+        pub fn bind(self: *Self, action: ActionEnum, predicate: Predicate) void {
+            self.actions[@intFromEnum(action)].main = predicate;
+        }
+
+        pub fn bindAlt(self: *Self, action: ActionEnum, predicate: Predicate) void {
+            self.actions[@intFromEnum(action)].alt = predicate;
+        }
+    };
+}
+
 pub const KeyEvent = enum(u8) { down, up, press, release };
 
 pub const Predicate = union(enum) {

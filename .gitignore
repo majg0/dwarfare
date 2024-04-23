@@ -6,5 +6,6 @@ vkvia.html
 zig-cache
 zig-out
 
-# data
+# data (TODO: move to app folder e.g. under XDG)
 *.dat
+*.rec

@@ -10,13 +10,28 @@ pub fn CircularBuffer(comptime T: type, comptime size: usize) type {
         value: [size]T,
         head_w: usize,
         head_r: usize,
+        tail: usize,
 
         pub fn init(self: *Self) void {
-            self.* = .{
+            self.* = Self{
                 .value = undefined,
                 .head_w = 0,
                 .head_r = 0,
+                .tail = 0,
             };
+        }
+
+        pub fn flush(self: *Self, file: std.fs.File) std.fs.File.WriteError!void {
+            if (self.tail == self.head_w) {
+                return;
+            }
+            if (self.tail < self.head_w) {
+                try file.writeAll(std.mem.sliceAsBytes(self.value[self.tail..self.head_w]));
+            } else {
+                try file.writeAll(std.mem.sliceAsBytes(self.value[self.tail..size]));
+                try file.writeAll(std.mem.sliceAsBytes(self.value[0..self.head_w]));
+            }
+            self.tail = self.head_w;
         }
 
         pub fn write(self: *Self, value: T) error{Full}!void {
@@ -28,11 +43,11 @@ pub fn CircularBuffer(comptime T: type, comptime size: usize) type {
             self.head_w = next;
         }
 
-        pub fn peek(self: *Self) ?T {
+        pub fn peek(self: *Self, offset: usize) ?T {
             if (self.head_r == self.head_w) {
                 return null;
             }
-            return self.value[self.head_r];
+            return self.value[(self.head_r + offset) & mask];
         }
 
         pub fn peek_w(self: *Self) ?T {
@@ -49,10 +64,8 @@ pub fn CircularBuffer(comptime T: type, comptime size: usize) type {
             self.value[(self.head_w - 1) & mask] = value;
         }
 
-        pub fn consume(self: *Self) error{Empty}!void {
-            if (self.head_r == self.head_w) {
-                return error.Empty;
-            }
+        /// NOTE: assumes having used peek to know it's safe to progress the read head
+        pub fn consume(self: *Self) void {
             self.head_r = (self.head_r + 1) & mask;
         }
 
