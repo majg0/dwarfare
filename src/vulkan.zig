@@ -76,6 +76,7 @@ test "vulkan alignment" {
 const Vertex = extern struct {
     pos: m.Vec2 align(vkBaseAlign(m.Vec2)),
     color: m.Vec3 align(vkBaseAlign(m.Vec3)),
+    uv: m.Vec2 align(vkBaseAlign(m.Vec2)),
 };
 
 const UniformBufferObject = extern struct {
@@ -84,21 +85,45 @@ const UniformBufferObject = extern struct {
     proj: m.Mat4,
 };
 
-const RenderData = extern struct {
+const Geometry = extern struct {
     vertices: [4]Vertex align(vkBaseAlign([4]Vertex)),
     indices: [6]u16 align(vkBaseAlign([6]u16)),
 };
 
-var render_data = RenderData{
-    .vertices = [_]Vertex{
-        .{ .pos = .{ -0.5, -0.5 }, .color = .{ 1, 0, 0 } },
-        .{ .pos = .{ 0.5, -0.5 }, .color = .{ 0, 1, 0 } },
-        .{ .pos = .{ 0.5, 0.5 }, .color = .{ 0, 0, 1 } },
-        .{ .pos = .{ -0.5, 0.5 }, .color = .{ 1, 1, 1 } },
+pub fn RgbaImage(comptime T: type, comptime width: comptime_int, comptime height: comptime_int) type {
+    return extern struct {
+        const size = width * height;
+        pixels: [size]@Vector(4, T),
+    };
+}
+
+const StagingData = extern struct {
+    image: RgbaImage(u8, 2, 2),
+    buffer: Geometry,
+};
+
+const RgbaU8 = @Vector(4, u8);
+const black = RgbaU8{ 0, 0, 0, 255 };
+const white = RgbaU8{ 255, 255, 255, 255 };
+
+const staging_data = StagingData{
+    .image = RgbaImage(u8, 2, 2){
+        .pixels = .{
+            black, white,
+            white, black,
+        },
     },
-    .indices = [_]u16{
-        0, 1, 2,
-        2, 3, 0,
+    .buffer = Geometry{
+        .vertices = [_]Vertex{
+            Vertex{ .pos = .{ -0.5, -0.5 }, .color = .{ 1, 0, 0 }, .uv = .{ 1, 0 } },
+            Vertex{ .pos = .{ 0.5, -0.5 }, .color = .{ 0, 1, 0 }, .uv = .{ 0, 0 } },
+            Vertex{ .pos = .{ 0.5, 0.5 }, .color = .{ 0, 0, 1 }, .uv = .{ 0, 1 } },
+            Vertex{ .pos = .{ -0.5, 0.5 }, .color = .{ 1, 1, 1 }, .uv = .{ 1, 1 } },
+        },
+        .indices = [_]u16{
+            0, 1, 2,
+            2, 3, 0,
+        },
     },
 };
 
@@ -134,7 +159,7 @@ const queue_family_count_max = 16;
 const device_extension_count_max = 512;
 const surface_format_count_max = 8;
 const surface_present_mode_count_max = 8;
-const swapchain_image_count_max = 8;
+const swapchain_image_count_max = 4;
 const shader_size_max = 2048;
 const shader_count = 2;
 const semaphore_count = 2;
@@ -144,6 +169,7 @@ const command_pool_count = 2;
 const command_pool_index_staging = 0;
 const command_pool_index_swapchain = 1;
 const buffer_count_max = 8;
+const image_count_max = 1;
 const device_memory_count = 2;
 const device_memory_index_device_local = 0;
 const device_memory_index_host_staging = 1;
@@ -288,7 +314,7 @@ pub const Vulkan = struct {
     ),
     shader_index_vert: usize = 0,
     shader_index_frag: usize = 1,
-    descriptor_set_layout_uniform: c.VkDescriptorSetLayout = null,
+    descriptor_set_layout: c.VkDescriptorSetLayout = null,
     pipeline_layout: c.VkPipelineLayout = null,
     render_pass: c.VkRenderPass = null,
     pipeline_graphics: c.VkPipeline = null,
@@ -321,6 +347,25 @@ pub const Vulkan = struct {
     ),
     fence_index_queue_submitted: u32 = 0,
     swapchain_frame_index_draw: usize = 0,
+    sampler: c.VkSampler = null,
+    image_count: usize = 0,
+    image: [image_count_max]c.VkImage = initArray(
+        c.VkImage,
+        image_count_max,
+        null,
+    ),
+    image_view: [image_count_max]c.VkImageView = initArray(
+        c.VkImageView,
+        image_count_max,
+        null,
+    ),
+    image_mapping: [image_count_max]Slice = initArray(
+        Slice,
+        image_count_max,
+        Slice{ .offset = 0, .size = 0 },
+    ),
+    image_index_checkerboard: usize = 0,
+    image_memory_requirements: [image_count_max]c.VkMemoryRequirements = undefined,
     buffer_count: usize = 0,
     buffer: [buffer_count_max]c.VkBuffer = initArray(
         c.VkBuffer,
@@ -340,6 +385,11 @@ pub const Vulkan = struct {
         c.VkDeviceMemory,
         device_memory_count,
         null,
+    ),
+    device_memory_image_index: [device_memory_count]Slice = initArray(
+        Slice,
+        device_memory_count,
+        Slice{ .offset = 0, .size = 0 },
     ),
     device_memory_buffer_index: [device_memory_count]Slice = initArray(
         Slice,
@@ -361,6 +411,11 @@ pub const Vulkan = struct {
     pub fn kill(self: Vulkan) void {
         _ = c.vkDeviceWaitIdle(self.device);
         self.swapchainKill();
+        c.vkDestroySampler(self.device, self.sampler, null);
+        for (0..self.image_count) |index| {
+            c.vkDestroyImageView(self.device, self.image_view[index], null);
+            c.vkDestroyImage(self.device, self.image[index], null);
+        }
         for (0..self.buffer_count) |index| {
             c.vkDestroyBuffer(self.device, self.buffer[index], null);
         }
@@ -368,7 +423,7 @@ pub const Vulkan = struct {
             c.vkFreeMemory(self.device, self.device_memory[index], null);
         }
         c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, null);
-        c.vkDestroyDescriptorSetLayout(self.device, self.descriptor_set_layout_uniform, null);
+        c.vkDestroyDescriptorSetLayout(self.device, self.descriptor_set_layout, null);
         for (0..self.swapchain_image_count) |swapchain_image_index| {
             for (0..fence_count) |index| {
                 c.vkDestroyFence(self.device, self.fence[swapchain_image_index][index], null);
@@ -563,7 +618,7 @@ pub const Vulkan = struct {
             }
         }
 
-        //createImageViews
+        // create image views for swapchain
         {
             for (0..self.swapchain_image_count) |index| {
                 const image_view_create_info = c.VkImageViewCreateInfo{
@@ -696,25 +751,35 @@ pub const Vulkan = struct {
 
             // create descriptor set layout
             {
+                const descriptor_set_layout_binding = [2]c.VkDescriptorSetLayoutBinding{
+                    c.VkDescriptorSetLayoutBinding{
+                        .binding = 0,
+                        .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                        .descriptorCount = 1,
+                        .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT,
+                        .pImmutableSamplers = null,
+                    },
+                    c.VkDescriptorSetLayoutBinding{
+                        .binding = 1,
+                        .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                        .descriptorCount = 1,
+                        .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT,
+                        .pImmutableSamplers = null,
+                    },
+                };
                 try errCheck(c.vkCreateDescriptorSetLayout(
                     self.device,
-                    &.{
+                    &c.VkDescriptorSetLayoutCreateInfo{
                         .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
                         .pNext = null,
                         .flags = 0,
-                        .bindingCount = 1,
-                        .pBindings = &.{
-                            .binding = 0,
-                            .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                            .descriptorCount = 1,
-                            .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT,
-                            .pImmutableSamplers = null,
-                        },
+                        .bindingCount = descriptor_set_layout_binding.len,
+                        .pBindings = &descriptor_set_layout_binding,
                     },
                     null,
-                    &self.descriptor_set_layout_uniform,
+                    &self.descriptor_set_layout,
                 ));
-                std.debug.assert(self.descriptor_set_layout_uniform != null);
+                std.debug.assert(self.descriptor_set_layout != null);
             }
 
             // create pipeline layout
@@ -726,7 +791,7 @@ pub const Vulkan = struct {
                         .pNext = null,
                         .flags = 0,
                         .setLayoutCount = 1,
-                        .pSetLayouts = &self.descriptor_set_layout_uniform,
+                        .pSetLayouts = &self.descriptor_set_layout,
                         .pushConstantRangeCount = 0,
                         .pPushConstantRanges = null,
                     },
@@ -769,7 +834,7 @@ pub const Vulkan = struct {
 
                 const pipeline_vertex_input_state_create_info = blk: {
                     const vertex_input_binding_description = [_]c.VkVertexInputBindingDescription{
-                        .{
+                        c.VkVertexInputBindingDescription{
                             .binding = 0,
                             .stride = @sizeOf(Vertex),
                             .inputRate = c.VK_VERTEX_INPUT_RATE_VERTEX,
@@ -777,17 +842,23 @@ pub const Vulkan = struct {
                     };
 
                     const vertex_input_attribute_description = [_]c.VkVertexInputAttributeDescription{
-                        .{
+                        c.VkVertexInputAttributeDescription{
                             .location = 0,
                             .binding = 0,
                             .format = c.VK_FORMAT_R32G32_SFLOAT,
                             .offset = @offsetOf(Vertex, "pos"),
                         },
-                        .{
+                        c.VkVertexInputAttributeDescription{
                             .location = 1,
                             .binding = 0,
                             .format = c.VK_FORMAT_R32G32B32_SFLOAT,
                             .offset = @offsetOf(Vertex, "color"),
+                        },
+                        c.VkVertexInputAttributeDescription{
+                            .location = 2,
+                            .binding = 0,
+                            .format = c.VK_FORMAT_R32G32_SFLOAT,
+                            .offset = @offsetOf(Vertex, "uv"),
                         },
                     };
 
@@ -1105,7 +1176,7 @@ pub const Vulkan = struct {
             c.vkCmdBindIndexBuffer(
                 command_buffer,
                 self.buffer[self.buffer_index_device],
-                @offsetOf(RenderData, "indices"),
+                @offsetOf(Geometry, "indices"),
                 c.VK_INDEX_TYPE_UINT16,
             );
 
@@ -1121,7 +1192,7 @@ pub const Vulkan = struct {
             );
             c.vkCmdDrawIndexed(
                 command_buffer,
-                render_data.indices.len,
+                staging_data.buffer.indices.len,
                 1,
                 0,
                 0,
@@ -1384,6 +1455,7 @@ pub const Vulkan = struct {
 
         // create device
         {
+            const features_available = self.physical_device_features[self.physical_device_index_gpu];
             try errCheck(c.vkCreateDevice(
                 self.physical_device[self.physical_device_index_gpu],
                 &c.VkDeviceCreateInfo{
@@ -1403,7 +1475,63 @@ pub const Vulkan = struct {
                     .ppEnabledLayerNames = null,
                     .enabledExtensionCount = device_extension_enable.len,
                     .ppEnabledExtensionNames = &device_extension_enable,
-                    .pEnabledFeatures = null,
+                    .pEnabledFeatures = &c.VkPhysicalDeviceFeatures{
+                        .robustBufferAccess = 0,
+                        .fullDrawIndexUint32 = 0,
+                        .imageCubeArray = 0,
+                        .independentBlend = 0,
+                        .geometryShader = 0,
+                        .tessellationShader = 0,
+                        .sampleRateShading = 0,
+                        .dualSrcBlend = 0,
+                        .logicOp = 0,
+                        .multiDrawIndirect = 0,
+                        .drawIndirectFirstInstance = 0,
+                        .depthClamp = 0,
+                        .depthBiasClamp = 0,
+                        .fillModeNonSolid = 0,
+                        .depthBounds = 0,
+                        .wideLines = 0,
+                        .largePoints = 0,
+                        .alphaToOne = 0,
+                        .multiViewport = 0,
+                        .samplerAnisotropy = features_available.samplerAnisotropy & c.VK_TRUE,
+                        .textureCompressionETC2 = 0,
+                        .textureCompressionASTC_LDR = 0,
+                        .textureCompressionBC = 0,
+                        .occlusionQueryPrecise = 0,
+                        .pipelineStatisticsQuery = 0,
+                        .vertexPipelineStoresAndAtomics = 0,
+                        .fragmentStoresAndAtomics = 0,
+                        .shaderTessellationAndGeometryPointSize = 0,
+                        .shaderImageGatherExtended = 0,
+                        .shaderStorageImageExtendedFormats = 0,
+                        .shaderStorageImageMultisample = 0,
+                        .shaderStorageImageReadWithoutFormat = 0,
+                        .shaderStorageImageWriteWithoutFormat = 0,
+                        .shaderUniformBufferArrayDynamicIndexing = 0,
+                        .shaderSampledImageArrayDynamicIndexing = 0,
+                        .shaderStorageBufferArrayDynamicIndexing = 0,
+                        .shaderStorageImageArrayDynamicIndexing = 0,
+                        .shaderClipDistance = 0,
+                        .shaderCullDistance = 0,
+                        .shaderFloat64 = 0,
+                        .shaderInt64 = 0,
+                        .shaderInt16 = 0,
+                        .shaderResourceResidency = 0,
+                        .shaderResourceMinLod = 0,
+                        .sparseBinding = 0,
+                        .sparseResidencyBuffer = 0,
+                        .sparseResidencyImage2D = 0,
+                        .sparseResidencyImage3D = 0,
+                        .sparseResidency2Samples = 0,
+                        .sparseResidency4Samples = 0,
+                        .sparseResidency8Samples = 0,
+                        .sparseResidency16Samples = 0,
+                        .sparseResidencyAliased = 0,
+                        .variableMultisampleRate = 0,
+                        .inheritedQueries = 0,
+                    },
                 },
                 null,
                 &self.device,
@@ -1466,34 +1594,145 @@ pub const Vulkan = struct {
             }
         }
 
+        // create samplers
+        {
+            const anisotropy_support = self.physical_device_features[self.physical_device_index_gpu].samplerAnisotropy;
+            try errCheck(c.vkCreateSampler(
+                self.device,
+                &c.VkSamplerCreateInfo{
+                    .sType = c.VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+                    .pNext = null,
+                    .flags = 0,
+                    .magFilter = c.VK_FILTER_NEAREST,
+                    .minFilter = c.VK_FILTER_NEAREST,
+                    .mipmapMode = c.VK_SAMPLER_MIPMAP_MODE_LINEAR,
+                    .addressModeU = c.VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                    .addressModeV = c.VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                    .addressModeW = c.VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                    .mipLodBias = 0,
+                    .anisotropyEnable = anisotropy_support & c.VK_TRUE,
+                    .maxAnisotropy = self.physical_device_properties[self.physical_device_index_gpu].limits.maxSamplerAnisotropy,
+                    .compareEnable = c.VK_FALSE,
+                    .compareOp = c.VK_COMPARE_OP_NEVER,
+                    .minLod = 0,
+                    .maxLod = 0,
+                    .borderColor = c.VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+                    .unnormalizedCoordinates = c.VK_FALSE,
+                },
+                null,
+                &self.sampler,
+            ));
+            std.debug.assert(self.sampler != null);
+        }
+
+        // create images
+        {
+            // setup pointers
+            {
+                // NOTE: required to be laid out grouped by expected memory properties and in the order of matching device_memory_index_*s
+
+                {
+                    // DEVICE_LOCAL
+                    std.debug.assert(device_memory_index_device_local == 0);
+                    {
+                        self.image_index_checkerboard = 0;
+                    }
+                    self.device_memory_image_index[device_memory_index_device_local] = Slice{
+                        .offset = 0,
+                        .size = 1,
+                    };
+                }
+
+                self.image_count = 1;
+                std.debug.assert(self.image_count <= image_count_max);
+            }
+
+            var image_create_info: [image_count_max]c.VkImageCreateInfo = undefined;
+            image_create_info[self.image_index_checkerboard] = c.VkImageCreateInfo{
+                .sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                .pNext = null,
+                .flags = 0,
+                .imageType = c.VK_IMAGE_TYPE_2D,
+                .format = c.VK_FORMAT_R8G8B8A8_SRGB,
+                .extent = c.VkExtent3D{
+                    .width = 2,
+                    .height = 2,
+                    .depth = 1,
+                },
+                .mipLevels = 1,
+                .arrayLayers = 1,
+                .samples = c.VK_SAMPLE_COUNT_1_BIT,
+                .tiling = c.VK_IMAGE_TILING_OPTIMAL,
+                .usage = c.VK_IMAGE_USAGE_TRANSFER_DST_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT,
+                .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
+                .queueFamilyIndexCount = 0,
+                .pQueueFamilyIndices = null,
+                .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
+            };
+
+            for (0..self.image_count) |index| {
+                try errCheck(c.vkCreateImage(
+                    self.device,
+                    &image_create_info[index],
+                    null,
+                    &self.image[index],
+                ));
+                std.debug.assert(self.image[index] != null);
+            }
+        }
+
+        // query image memory requirements
+        {
+            std.debug.print("\nImages: ({})\n", .{self.image_count});
+            for (0..self.image_count) |index| {
+                const req = &self.image_memory_requirements[index];
+                c.vkGetImageMemoryRequirements(
+                    self.device,
+                    self.image[index],
+                    req,
+                );
+                std.debug.print("  - size:{}, alignment:{}, memoryTypeBits:0b{b}\n", .{
+                    req.size,
+                    req.alignment,
+                    req.memoryTypeBits,
+                });
+            }
+        }
+
         // create buffers
         {
             // setup pointers
             {
                 // NOTE: required to be laid out grouped by expected memory properties and in the order of matching device_memory_index_*s
 
-                // DEVICE_LOCAL
-                std.debug.assert(device_memory_index_device_local == 0);
                 {
-                    self.buffer_index_device = 0;
-                }
-                self.device_memory_buffer_index[device_memory_index_device_local] = Slice{
-                    .offset = 0,
-                    .size = 1,
-                };
-                // HOST_VISIBLE | HOST_COHERENT
-                std.debug.assert(device_memory_index_host_staging == 1);
-                {
-                    self.buffer_index_staging = 1;
-                    self.buffer_index_uniform = Slice{
-                        .offset = 2,
-                        .size = self.swapchain_image_count,
+                    // DEVICE_LOCAL
+                    std.debug.assert(device_memory_index_device_local == 0);
+                    {
+                        self.buffer_index_device = 0;
+                    }
+                    self.device_memory_buffer_index[device_memory_index_device_local] = Slice{
+                        .offset = 0,
+                        .size = 1,
                     };
                 }
-                self.device_memory_buffer_index[device_memory_index_host_staging] = Slice{
-                    .offset = 1,
-                    .size = 1 + self.swapchain_image_count,
-                };
+
+                {
+                    // HOST_VISIBLE | HOST_COHERENT
+                    std.debug.assert(device_memory_index_host_staging == 1);
+                    {
+                        self.buffer_index_staging = 1;
+                        self.buffer_index_uniform = Slice{
+                            .offset = 2,
+                            .size = self.swapchain_image_count,
+                        };
+                    }
+                    self.device_memory_buffer_index[device_memory_index_host_staging] = Slice{
+                        .offset = 1,
+                        .size = 1 + self.swapchain_image_count,
+                    };
+                }
+
                 self.buffer_count = 2 + self.swapchain_image_count;
                 std.debug.assert(self.buffer_count <= buffer_count_max);
             }
@@ -1503,7 +1742,7 @@ pub const Vulkan = struct {
                 .sType = c.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
                 .pNext = null,
                 .flags = 0,
-                .size = @sizeOf(RenderData),
+                .size = @sizeOf(StagingData),
                 .usage = c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                 .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
                 .queueFamilyIndexCount = 0,
@@ -1513,7 +1752,7 @@ pub const Vulkan = struct {
                 .sType = c.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
                 .pNext = null,
                 .flags = 0,
-                .size = @sizeOf(RenderData),
+                .size = @sizeOf(Geometry),
                 .usage = c.VK_BUFFER_USAGE_TRANSFER_DST_BIT | c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | c.VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
                 .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
                 .queueFamilyIndexCount = 0,
@@ -1547,14 +1786,13 @@ pub const Vulkan = struct {
         {
             std.debug.print("\nBuffers: ({})\n", .{self.buffer_count});
             for (0..self.buffer_count) |index| {
+                const req = &self.buffer_memory_requirements[index];
                 c.vkGetBufferMemoryRequirements(
                     self.device,
                     self.buffer[index],
-                    &self.buffer_memory_requirements[index],
+                    req,
                 );
-                const req = self.buffer_memory_requirements[index];
-                std.debug.print("  {}. size:{}, alignment:{}, memoryTypeBits:0b{b}\n", .{
-                    index,
+                std.debug.print("  - size:{}, alignment:{}, memoryTypeBits:0b{b}\n", .{
                     req.size,
                     req.alignment,
                     req.memoryTypeBits,
@@ -1568,19 +1806,44 @@ pub const Vulkan = struct {
             memory_properties_required[device_memory_index_device_local] = c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
             memory_properties_required[device_memory_index_host_staging] = c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 
+            std.debug.print("\nDevice Memory ({}):\n", .{device_memory_count});
             for (0..device_memory_count) |device_memory_index| {
                 const device_properties_required = memory_properties_required[device_memory_index];
-
+                std.debug.print("  - properties: 0b{b:0>9}\n", .{device_properties_required});
                 const device_properties = self.physical_device_memory_properties[self.physical_device_index_gpu];
-                std.debug.print("Device memory {}: 0b{b} {}\n", .{
-                    device_memory_index,
-                    device_properties_required,
-                    device_properties.memoryTypeCount,
-                });
 
                 var allocation_size: u64 = 0;
                 var memory_type_index: u32 = 0;
 
+                std.debug.print("    images:\n", .{});
+                const image_batch = self.device_memory_image_index[device_memory_index];
+                for (0..image_batch.size) |image_index_batch| {
+                    const image_index = image_batch.offset + image_index_batch;
+                    const memory_requirements = self.image_memory_requirements[image_index];
+                    allocation_size = std.mem.alignForward(
+                        usize,
+                        allocation_size,
+                        memory_requirements.alignment,
+                    );
+                    std.debug.print("      - index:{}, offset:{}, size:{}\n", .{ image_index, allocation_size, memory_requirements.size });
+                    self.image_mapping[image_index] = .{
+                        .offset = allocation_size,
+                        .size = memory_requirements.size,
+                    };
+                    allocation_size += memory_requirements.size;
+                    memory_type_index = blk: {
+                        for (0..device_properties.memoryTypeCount) |index| {
+                            const memory_type_required = (memory_requirements.memoryTypeBits & std.math.shl(u32, 1, index)) != 0;
+                            const properties_satisfied = (device_properties.memoryTypes[index].propertyFlags & device_properties_required) == device_properties_required;
+                            if (memory_type_required and properties_satisfied) {
+                                break :blk @intCast(index);
+                            }
+                        }
+                        return error.VkMemoryTypeIndexNotFound;
+                    };
+                }
+
+                std.debug.print("    buffers:\n", .{});
                 const buffer_batch = self.device_memory_buffer_index[device_memory_index];
                 for (0..buffer_batch.size) |buffer_index_batch| {
                     const buffer_index = buffer_batch.offset + buffer_index_batch;
@@ -1590,6 +1853,7 @@ pub const Vulkan = struct {
                         allocation_size,
                         memory_requirements.alignment,
                     );
+                    std.debug.print("      - index:{}, offset:{}, size:{}\n", .{ buffer_index, allocation_size, memory_requirements.size });
                     self.buffer_mapping[buffer_index] = .{
                         .offset = allocation_size,
                         .size = memory_requirements.size,
@@ -1606,7 +1870,8 @@ pub const Vulkan = struct {
                         return error.VkMemoryTypeIndexNotFound;
                     };
                 }
-                std.debug.print("allocation size: {}\n", .{allocation_size});
+
+                std.debug.print("    size: {}\n", .{allocation_size});
 
                 try errCheck(c.vkAllocateMemory(
                     self.device,
@@ -1623,9 +1888,20 @@ pub const Vulkan = struct {
             }
         }
 
-        // bind buffer memory
+        // bind memory
         {
             inline for (0..device_memory_count) |device_memory_index| {
+                const image_batch = self.device_memory_image_index[device_memory_index];
+                for (0..image_batch.size) |image_index_batch| {
+                    const image_index = image_batch.offset + image_index_batch;
+                    try errCheck(c.vkBindImageMemory(
+                        self.device,
+                        self.image[image_index],
+                        self.device_memory[device_memory_index],
+                        self.image_mapping[image_index].offset,
+                    ));
+                }
+
                 const buffer_batch = self.device_memory_buffer_index[device_memory_index];
                 for (0..buffer_batch.size) |buffer_index_batch| {
                     const buffer_index = buffer_batch.offset + buffer_index_batch;
@@ -1639,7 +1915,40 @@ pub const Vulkan = struct {
             }
         }
 
-        // write draw buffer to device staging memory
+        // create image views
+        {
+            for (0..self.image_count) |index| {
+                try errCheck(c.vkCreateImageView(
+                    self.device,
+                    &c.VkImageViewCreateInfo{
+                        .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                        .pNext = null,
+                        .flags = 0,
+                        .image = self.image[index],
+                        .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
+                        .format = c.VK_FORMAT_R8G8B8A8_SRGB,
+                        .components = c.VkComponentMapping{
+                            .r = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                            .g = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                            .b = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                            .a = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                        },
+                        .subresourceRange = c.VkImageSubresourceRange{
+                            .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                            .baseMipLevel = 0,
+                            .levelCount = 1,
+                            .baseArrayLayer = 0,
+                            .layerCount = 1,
+                        },
+                    },
+                    null,
+                    &self.image_view[index],
+                ));
+                std.debug.assert(self.image_view[index] != null);
+            }
+        }
+
+        // write staging memory
         {
             const mapping = self.buffer_mapping[self.buffer_index_staging];
             var data: ?*anyopaque = null;
@@ -1652,7 +1961,7 @@ pub const Vulkan = struct {
                 &data,
             ));
             std.debug.assert(data != null);
-            @memcpy(@as([*]u8, @ptrCast(@alignCast(data))), std.mem.asBytes(&render_data));
+            @memcpy(@as([*]u8, @ptrCast(@alignCast(data))), std.mem.asBytes(&staging_data));
             c.vkUnmapMemory(self.device, self.device_memory[device_memory_index_host_staging]);
         }
 
@@ -1684,17 +1993,101 @@ pub const Vulkan = struct {
                 },
             ));
 
-            std.debug.assert(self.buffer_mapping[self.buffer_index_staging].size ==
-                self.buffer_mapping[self.buffer_index_device].size);
+            // copy buffer from host to device
             c.vkCmdCopyBuffer(
                 command_buffer,
                 self.buffer[self.buffer_index_staging],
                 self.buffer[self.buffer_index_device],
                 1,
-                &.{
-                    .srcOffset = 0,
+                &c.VkBufferCopy{
+                    .srcOffset = @offsetOf(StagingData, "buffer"),
                     .dstOffset = 0,
-                    .size = self.buffer_mapping[self.buffer_index_staging].size,
+                    .size = self.buffer_mapping[self.buffer_index_device].size,
+                },
+            );
+
+            // transition image layout for copying into
+            c.vkCmdPipelineBarrier(
+                command_buffer,
+                c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                c.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0,
+                0,
+                null,
+                0,
+                null,
+                1,
+                &c.VkImageMemoryBarrier{
+                    .sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                    .pNext = null,
+                    .srcAccessMask = 0,
+                    .dstAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT,
+                    .oldLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
+                    .newLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    .srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+                    .dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+                    .image = self.image[self.image_index_checkerboard],
+                    .subresourceRange = c.VkImageSubresourceRange{
+                        .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                        .baseMipLevel = 0,
+                        .levelCount = 1,
+                        .baseArrayLayer = 0,
+                        .layerCount = 1,
+                    },
+                },
+            );
+
+            // copy image from host to device
+            c.vkCmdCopyBufferToImage(
+                command_buffer,
+                self.buffer[self.buffer_index_staging],
+                self.image[self.image_index_checkerboard],
+                c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                1,
+                &c.VkBufferImageCopy{
+                    .bufferOffset = self.buffer_mapping[self.buffer_index_staging].offset +
+                        @offsetOf(StagingData, "image"),
+                    .bufferRowLength = 0, // tightly packed
+                    .bufferImageHeight = 0, // tightly packed
+                    .imageSubresource = c.VkImageSubresourceLayers{
+                        .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                        .mipLevel = 0,
+                        .baseArrayLayer = 0,
+                        .layerCount = 1,
+                    },
+                    .imageOffset = c.VkOffset3D{ .x = 0, .y = 0, .z = 0 },
+                    .imageExtent = c.VkExtent3D{ .width = 2, .height = 2, .depth = 1 },
+                },
+            );
+
+            // transition image layout for reading from fragment shader
+            c.vkCmdPipelineBarrier(
+                command_buffer,
+                c.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                0,
+                0,
+                null,
+                0,
+                null,
+                1,
+                &c.VkImageMemoryBarrier{
+                    .sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                    .pNext = null,
+                    .srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT,
+                    .dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT,
+                    .oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    .newLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    .srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+                    .dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+                    .image = self.image[self.image_index_checkerboard],
+                    .subresourceRange = c.VkImageSubresourceRange{
+                        .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                        .baseMipLevel = 0,
+                        .levelCount = 1,
+                        .baseArrayLayer = 0,
+                        .layerCount = 1,
+                    },
                 },
             );
 
@@ -1763,15 +2156,22 @@ pub const Vulkan = struct {
 
         // create descriptor pool
         {
+            const descriptor_pool_size = [2]c.VkDescriptorPoolSize{
+                c.VkDescriptorPoolSize{
+                    .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                    .descriptorCount = self.swapchain_image_count,
+                },
+                c.VkDescriptorPoolSize{
+                    .type = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                    .descriptorCount = self.swapchain_image_count,
+                },
+            };
             try errCheck(c.vkCreateDescriptorPool(
                 self.device,
                 &c.VkDescriptorPoolCreateInfo{
                     .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-                    .poolSizeCount = 1,
-                    .pPoolSizes = &c.VkDescriptorPoolSize{
-                        .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                        .descriptorCount = self.swapchain_image_count,
-                    },
+                    .poolSizeCount = descriptor_pool_size.len,
+                    .pPoolSizes = &descriptor_pool_size,
                     .maxSets = self.swapchain_image_count,
                 },
                 null,
@@ -1784,7 +2184,7 @@ pub const Vulkan = struct {
         {
             var layouts: [swapchain_image_count_max]c.VkDescriptorSetLayout = undefined;
             for (0..self.swapchain_image_count) |index| {
-                layouts[index] = self.descriptor_set_layout_uniform;
+                layouts[index] = self.descriptor_set_layout;
             }
             try errCheck(c.vkAllocateDescriptorSets(
                 self.device,
@@ -1805,7 +2205,7 @@ pub const Vulkan = struct {
         // populate descriptor sets
         {
             for (0..self.swapchain_image_count) |index| {
-                const descriptor_write = [1]c.VkWriteDescriptorSet{
+                const descriptor_write = [2]c.VkWriteDescriptorSet{
                     c.VkWriteDescriptorSet{
                         .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                         .pNext = null,
@@ -1820,6 +2220,22 @@ pub const Vulkan = struct {
                             .offset = 0,
                             .range = self.buffer_mapping[self.buffer_index_uniform.offset + index].size,
                         },
+                        .pTexelBufferView = null,
+                    },
+                    c.VkWriteDescriptorSet{
+                        .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                        .pNext = null,
+                        .dstSet = self.descriptor_set[index],
+                        .dstBinding = 1,
+                        .dstArrayElement = 0,
+                        .descriptorCount = 1,
+                        .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                        .pImageInfo = &c.VkDescriptorImageInfo{
+                            .sampler = self.sampler,
+                            .imageView = self.image_view[self.image_index_checkerboard],
+                            .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        },
+                        .pBufferInfo = null,
                         .pTexelBufferView = null,
                     },
                 };
