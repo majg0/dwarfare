@@ -203,6 +203,8 @@ pub fn main() !void {
     };
     var key_voices = KeyVoices{};
 
+    // TODO: use app data folder instead
+    try std.fs.cwd().makePath("recordings");
     const recording = try std.fs.cwd().createFile(
         "recordings/test.rec",
         .{ .read = true, .truncate = false },
