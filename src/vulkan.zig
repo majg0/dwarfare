@@ -10,68 +10,6 @@ const c = @cImport({
 
 // DOCS: https://docs.vulkan.org/spec/latest/index.html
 
-// DOCS: https://registry.khronos.org/vulkan/specs/1.3-extensions/html/chap15.html#interfaces-resources-layout
-fn vkBaseAlign(comptime T: type) comptime_int {
-    return switch (@typeInfo(T)) {
-        // NOTE: A scalar of size N has a scalar alignment of N.
-        .Float => @sizeOf(T),
-        .Int => @sizeOf(T),
-        .ComptimeFloat => @sizeOf(T),
-        .ComptimeInt => @sizeOf(T),
-
-        .Vector => |vector| switch (vector.len) {
-            // NOTE: A two-component vector has a base alignment equal to twice its scalar alignment.
-            2 => 2 * @sizeOf(vector.child),
-            // NOTE: A three- or four-component vector has a base alignment equal to four times its scalar alignment.
-            3 => 4 * @sizeOf(vector.child),
-            4 => 4 * @sizeOf(vector.child),
-            else => unreachable,
-        },
-
-        // NOTE: An array has a base alignment equal to the base alignment of its element type.
-        // NOTE: A matrix type inherits base alignment from the equivalent array declaration.
-        .Array => |array| vkBaseAlign(array.child),
-
-        // NOTE: A structure has a base alignment equal to the largest base alignment of any of its members.
-        .Struct => |s| blk: {
-            var max = 0;
-            for (s.fields) |field| {
-                // NOTE: fields are assumed to explicitly aligned, so we don't need recursion.
-                max = @max(field.alignment, max);
-            }
-            break :blk max;
-        },
-
-        else => unreachable,
-    };
-}
-
-// NOTE: run using `zig test src/vulkan.zig` until integrated with `build.zig`
-// TODO: integrate with `build.zig`
-test "vulkan alignment" {
-    try std.testing.expectEqual(@sizeOf(m.Real), vkBaseAlign(m.Real));
-    try std.testing.expectEqual(@sizeOf(m.Real), vkBaseAlign([4]m.Real));
-    try std.testing.expectEqual(2 * @sizeOf(m.Real), vkBaseAlign(m.Vec2));
-    try std.testing.expectEqual(4 * @sizeOf(m.Real), vkBaseAlign(m.Vec3));
-    try std.testing.expectEqual(@max(vkBaseAlign(m.Vec2), vkBaseAlign(m.Vec3)), vkBaseAlign(Vertex));
-    // TODO: standard buffer alignment
-
-    // TODO: move this out of base alignment requirements
-    // .Array => |array| switch (@typeInfo(array.child)) {
-    //     // NOTE: All vectors must be aligned according to their scalar alignment.
-    //     .Vector => |vector| vector.len * vkBaseAlign(vector.child),
-    //     // TODO: how to enforce the following?
-    //     // If the uniformBufferStandardLayout feature is not enabled on the device, then any member of an OpTypeStruct with a storage class of Uniform and a decoration of Block must be aligned according to its extended alignment.
-
-    //     // NOTE: Every other member must be aligned according to its base alignment.
-    //     else => vkBaseAlign(array.child),
-    // },
-
-    // try std.testing.expectEqual(3 * @sizeOf(Real), vkBaseAlign([1]Vec3));
-}
-
-///////////////////////// temp static data
-
 // TODO: use standard buffer alignment instead
 const Vertex = extern struct {
     pos: m.Vec2 align(vkBaseAlign(m.Vec2)),
@@ -180,66 +118,6 @@ fn initArray(comptime T: type, comptime size: usize, comptime value: T) [size]T 
         elem.* = value;
     }
     return array;
-}
-
-fn errCheck(result: c.VkResult) !void {
-    return switch (result) {
-        c.VK_SUCCESS => {},
-        c.VK_NOT_READY => error.VkNotReady,
-        c.VK_TIMEOUT => error.VkTimeout,
-        c.VK_EVENT_SET => error.VkEventSet,
-        c.VK_EVENT_RESET => error.VkEventReset,
-        c.VK_INCOMPLETE => error.VkIncomplete,
-        c.VK_ERROR_OUT_OF_HOST_MEMORY => error.VkErrorOutOfHostMemory,
-        c.VK_ERROR_OUT_OF_DEVICE_MEMORY => error.VkErrorOutOfDeviceMemory,
-        c.VK_ERROR_INITIALIZATION_FAILED => error.VkErrorInitializationFailed,
-        c.VK_ERROR_DEVICE_LOST => error.VkErrorDeviceLost,
-        c.VK_ERROR_MEMORY_MAP_FAILED => error.VkErrorMemoryMapFailed,
-        c.VK_ERROR_LAYER_NOT_PRESENT => error.VkErrorLayerNotPresent,
-        c.VK_ERROR_EXTENSION_NOT_PRESENT => error.VkErrorExtensionNotPresent,
-        c.VK_ERROR_FEATURE_NOT_PRESENT => error.VkErrorFeatureNotPresent,
-        c.VK_ERROR_INCOMPATIBLE_DRIVER => error.VkErrorIncompatibleDriver,
-        c.VK_ERROR_TOO_MANY_OBJECTS => error.VkErrorTooManyObjects,
-        c.VK_ERROR_FORMAT_NOT_SUPPORTED => error.VkErrorFormatNotSupported,
-        c.VK_ERROR_FRAGMENTED_POOL => error.VkErrorFragmentedPool,
-        c.VK_ERROR_UNKNOWN => error.VkErrorUnknown,
-        c.VK_ERROR_OUT_OF_POOL_MEMORY => error.VkErrorOutOfPoolMemory,
-        c.VK_ERROR_INVALID_EXTERNAL_HANDLE => error.VkErrorInvalidExternalHandle,
-        c.VK_ERROR_FRAGMENTATION => error.VkErrorFragmentation,
-        c.VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS => error.VkErrorInvalidOpaqueCaptureAddress,
-        c.VK_PIPELINE_COMPILE_REQUIRED => error.VkPipelineCompileRequired,
-        c.VK_ERROR_SURFACE_LOST_KHR => error.VkSurfaceLostKhr,
-        c.VK_ERROR_NATIVE_WINDOW_IN_USE_KHR => error.VkErrorNativeWindowInUseKhr,
-        c.VK_SUBOPTIMAL_KHR => error.VkSuboptimalKhr,
-        c.VK_ERROR_OUT_OF_DATE_KHR => error.VkErrorOutOfDateKhr,
-        c.VK_ERROR_INCOMPATIBLE_DISPLAY_KHR => error.VkErrorIncompatibleDisplayKhr,
-        c.VK_ERROR_VALIDATION_FAILED_EXT => error.VkErrorValidationFailedExt,
-        c.VK_ERROR_INVALID_SHADER_NV => error.VkErrorInvalidShaderNv,
-        c.VK_ERROR_IMAGE_USAGE_NOT_SUPPORTED_KHR => error.VkErrorImageUsageNotSupportedKhr,
-        c.VK_ERROR_VIDEO_PICTURE_LAYOUT_NOT_SUPPORTED_KHR => error.VkErrorVideoPictureLayoutNotSupportedKhr,
-        c.VK_ERROR_VIDEO_PROFILE_OPERATION_NOT_SUPPORTED_KHR => error.VkErrorVideoProfileOperationNotSupportedKhr,
-        c.VK_ERROR_VIDEO_PROFILE_FORMAT_NOT_SUPPORTED_KHR => error.VkErrorVideoProfileFormatNotSupportedKhr,
-        c.VK_ERROR_VIDEO_PROFILE_CODEC_NOT_SUPPORTED_KHR => error.VkErrorVideoProfileCodecNotSupportedKhr,
-        c.VK_ERROR_VIDEO_STD_VERSION_NOT_SUPPORTED_KHR => error.VkErrorVideoStdVersionNotSupportedKhr,
-        c.VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT => error.VkErrorInvalidDrmFormatModifierPlaneLayoutExt,
-        c.VK_ERROR_NOT_PERMITTED_KHR => error.VkErrorNotPermittedKhr,
-        c.VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT => error.VkErrorFullScreenExclusiveModeLostExt,
-        c.VK_THREAD_IDLE_KHR => error.VkThreadIdleKhr,
-        c.VK_THREAD_DONE_KHR => error.VkThreadDoneKhr,
-        c.VK_OPERATION_DEFERRED_KHR => error.VkOperationDeferredKhr,
-        c.VK_OPERATION_NOT_DEFERRED_KHR => error.VkOperationNotDeferredKhr,
-        c.VK_ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR => error.VkErrorInvalidVideoStdParametersKhr,
-        c.VK_ERROR_COMPRESSION_EXHAUSTED_EXT => error.VkErrorCompressionExhaustedExt,
-        c.VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT => error.VkErrorIncompatibleShaderBinaryExt,
-        else => error.VkErrorGeneric,
-    };
-}
-
-fn errCheckAllowIncomplete(result: c.VkResult) !void {
-    if (result == c.VK_INCOMPLETE) {
-        return;
-    }
-    return errCheck(result);
 }
 
 // TODO: move somewhere else if reused
@@ -453,6 +331,7 @@ pub const Vulkan = struct {
         }
         c.vkDestroySwapchainKHR(self.device, self.swapchain, null);
     }
+
     pub fn swapchainInit(self: *Vulkan, comptime initial_init: bool) !void {
         try errCheck(c.vkDeviceWaitIdle(self.device));
 
@@ -1009,7 +888,7 @@ pub const Vulkan = struct {
         }
     }
 
-    pub fn frameDraw(self: *Vulkan) !void {
+    pub fn frameDraw(self: *Vulkan, t: f32) !void {
         // poll readiness
         {
             const fence_status = c.vkGetFenceStatus(self.device, self.fence[self.swapchain_frame_index_draw][self.fence_index_queue_submitted]);
@@ -1061,10 +940,10 @@ pub const Vulkan = struct {
             };
             const ubo = UniformBufferObject{
                 .model = m.Mat4{
-                    1, 0, 0, 0,
-                    0, 1, 0, 0,
-                    0, 0, 1, 0,
-                    0, 0, 0, 1,
+                    @cos(t),  @sin(t), 0, 0,
+                    -@sin(t), @cos(t), 0, 0,
+                    0,        0,       1, 0,
+                    0,        0,       0, 1,
                 },
                 .view = m.Mat4{
                     cam_right[0],       cam_up[0],          cam_forward[0],     0,
@@ -1079,13 +958,9 @@ pub const Vulkan = struct {
                     1000,
                 ),
             };
-            @memcpy(
-                @as(
-                    [*]u8,
-                    @ptrCast(self.mapped_memory_ubo[self.swapchain_frame_index_draw]),
-                ),
-                std.mem.asBytes(&ubo),
-            );
+
+            const ptr: *UniformBufferObject = @ptrCast(@alignCast(self.mapped_memory_ubo[self.swapchain_frame_index_draw]));
+            ptr.* = ubo;
             std.debug.assert(self.device_memory[device_memory_index_host_staging] != null);
         }
 
@@ -1245,6 +1120,8 @@ pub const Vulkan = struct {
     }
 
     pub fn init(self: *Vulkan, ui: xcb.XcbUi) !void {
+        self.* = .{};
+
         std.debug.print("\n=== Vulkan ===\n", .{});
 
         // query instance version
@@ -2292,3 +2169,123 @@ pub const Vulkan = struct {
         }
     }
 };
+
+fn errCheck(result: c.VkResult) !void {
+    return switch (result) {
+        c.VK_SUCCESS => {},
+        c.VK_NOT_READY => error.VkNotReady,
+        c.VK_TIMEOUT => error.VkTimeout,
+        c.VK_EVENT_SET => error.VkEventSet,
+        c.VK_EVENT_RESET => error.VkEventReset,
+        c.VK_INCOMPLETE => error.VkIncomplete,
+        c.VK_ERROR_OUT_OF_HOST_MEMORY => error.VkErrorOutOfHostMemory,
+        c.VK_ERROR_OUT_OF_DEVICE_MEMORY => error.VkErrorOutOfDeviceMemory,
+        c.VK_ERROR_INITIALIZATION_FAILED => error.VkErrorInitializationFailed,
+        c.VK_ERROR_DEVICE_LOST => error.VkErrorDeviceLost,
+        c.VK_ERROR_MEMORY_MAP_FAILED => error.VkErrorMemoryMapFailed,
+        c.VK_ERROR_LAYER_NOT_PRESENT => error.VkErrorLayerNotPresent,
+        c.VK_ERROR_EXTENSION_NOT_PRESENT => error.VkErrorExtensionNotPresent,
+        c.VK_ERROR_FEATURE_NOT_PRESENT => error.VkErrorFeatureNotPresent,
+        c.VK_ERROR_INCOMPATIBLE_DRIVER => error.VkErrorIncompatibleDriver,
+        c.VK_ERROR_TOO_MANY_OBJECTS => error.VkErrorTooManyObjects,
+        c.VK_ERROR_FORMAT_NOT_SUPPORTED => error.VkErrorFormatNotSupported,
+        c.VK_ERROR_FRAGMENTED_POOL => error.VkErrorFragmentedPool,
+        c.VK_ERROR_UNKNOWN => error.VkErrorUnknown,
+        c.VK_ERROR_OUT_OF_POOL_MEMORY => error.VkErrorOutOfPoolMemory,
+        c.VK_ERROR_INVALID_EXTERNAL_HANDLE => error.VkErrorInvalidExternalHandle,
+        c.VK_ERROR_FRAGMENTATION => error.VkErrorFragmentation,
+        c.VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS => error.VkErrorInvalidOpaqueCaptureAddress,
+        c.VK_PIPELINE_COMPILE_REQUIRED => error.VkPipelineCompileRequired,
+        c.VK_ERROR_SURFACE_LOST_KHR => error.VkSurfaceLostKhr,
+        c.VK_ERROR_NATIVE_WINDOW_IN_USE_KHR => error.VkErrorNativeWindowInUseKhr,
+        c.VK_SUBOPTIMAL_KHR => error.VkSuboptimalKhr,
+        c.VK_ERROR_OUT_OF_DATE_KHR => error.VkErrorOutOfDateKhr,
+        c.VK_ERROR_INCOMPATIBLE_DISPLAY_KHR => error.VkErrorIncompatibleDisplayKhr,
+        c.VK_ERROR_VALIDATION_FAILED_EXT => error.VkErrorValidationFailedExt,
+        c.VK_ERROR_INVALID_SHADER_NV => error.VkErrorInvalidShaderNv,
+        c.VK_ERROR_IMAGE_USAGE_NOT_SUPPORTED_KHR => error.VkErrorImageUsageNotSupportedKhr,
+        c.VK_ERROR_VIDEO_PICTURE_LAYOUT_NOT_SUPPORTED_KHR => error.VkErrorVideoPictureLayoutNotSupportedKhr,
+        c.VK_ERROR_VIDEO_PROFILE_OPERATION_NOT_SUPPORTED_KHR => error.VkErrorVideoProfileOperationNotSupportedKhr,
+        c.VK_ERROR_VIDEO_PROFILE_FORMAT_NOT_SUPPORTED_KHR => error.VkErrorVideoProfileFormatNotSupportedKhr,
+        c.VK_ERROR_VIDEO_PROFILE_CODEC_NOT_SUPPORTED_KHR => error.VkErrorVideoProfileCodecNotSupportedKhr,
+        c.VK_ERROR_VIDEO_STD_VERSION_NOT_SUPPORTED_KHR => error.VkErrorVideoStdVersionNotSupportedKhr,
+        c.VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT => error.VkErrorInvalidDrmFormatModifierPlaneLayoutExt,
+        c.VK_ERROR_NOT_PERMITTED_KHR => error.VkErrorNotPermittedKhr,
+        c.VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT => error.VkErrorFullScreenExclusiveModeLostExt,
+        c.VK_THREAD_IDLE_KHR => error.VkThreadIdleKhr,
+        c.VK_THREAD_DONE_KHR => error.VkThreadDoneKhr,
+        c.VK_OPERATION_DEFERRED_KHR => error.VkOperationDeferredKhr,
+        c.VK_OPERATION_NOT_DEFERRED_KHR => error.VkOperationNotDeferredKhr,
+        c.VK_ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR => error.VkErrorInvalidVideoStdParametersKhr,
+        c.VK_ERROR_COMPRESSION_EXHAUSTED_EXT => error.VkErrorCompressionExhaustedExt,
+        c.VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT => error.VkErrorIncompatibleShaderBinaryExt,
+        else => error.VkErrorGeneric,
+    };
+}
+
+fn errCheckAllowIncomplete(result: c.VkResult) !void {
+    if (result == c.VK_INCOMPLETE) {
+        return;
+    }
+    return errCheck(result);
+}
+
+// DOCS: https://registry.khronos.org/vulkan/specs/1.3-extensions/html/chap15.html#interfaces-resources-layout
+fn vkBaseAlign(comptime T: type) comptime_int {
+    return switch (@typeInfo(T)) {
+        // NOTE: A scalar of size N has a scalar alignment of N.
+        .Float => @sizeOf(T),
+        .Int => @sizeOf(T),
+        .ComptimeFloat => @sizeOf(T),
+        .ComptimeInt => @sizeOf(T),
+
+        .Vector => |vector| switch (vector.len) {
+            // NOTE: A two-component vector has a base alignment equal to twice its scalar alignment.
+            2 => 2 * @sizeOf(vector.child),
+            // NOTE: A three- or four-component vector has a base alignment equal to four times its scalar alignment.
+            3 => 4 * @sizeOf(vector.child),
+            4 => 4 * @sizeOf(vector.child),
+            else => unreachable,
+        },
+
+        // NOTE: An array has a base alignment equal to the base alignment of its element type.
+        // NOTE: A matrix type inherits base alignment from the equivalent array declaration.
+        .Array => |array| vkBaseAlign(array.child),
+
+        // NOTE: A structure has a base alignment equal to the largest base alignment of any of its members.
+        .Struct => |s| blk: {
+            var max = 0;
+            for (s.fields) |field| {
+                // NOTE: fields are assumed to explicitly aligned, so we don't need recursion.
+                max = @max(field.alignment, max);
+            }
+            break :blk max;
+        },
+
+        else => unreachable,
+    };
+}
+
+// NOTE: run using `zig test src/vulkan.zig` until integrated with `build.zig`
+// TODO: integrate with `build.zig`
+test "vulkan alignment" {
+    try std.testing.expectEqual(@sizeOf(m.Real), vkBaseAlign(m.Real));
+    try std.testing.expectEqual(@sizeOf(m.Real), vkBaseAlign([4]m.Real));
+    try std.testing.expectEqual(2 * @sizeOf(m.Real), vkBaseAlign(m.Vec2));
+    try std.testing.expectEqual(4 * @sizeOf(m.Real), vkBaseAlign(m.Vec3));
+    try std.testing.expectEqual(@max(vkBaseAlign(m.Vec2), vkBaseAlign(m.Vec3)), vkBaseAlign(Vertex));
+    // TODO: standard buffer alignment
+
+    // TODO: move this out of base alignment requirements
+    // .Array => |array| switch (@typeInfo(array.child)) {
+    //     // NOTE: All vectors must be aligned according to their scalar alignment.
+    //     .Vector => |vector| vector.len * vkBaseAlign(vector.child),
+    //     // TODO: how to enforce the following?
+    //     // If the uniformBufferStandardLayout feature is not enabled on the device, then any member of an OpTypeStruct with a storage class of Uniform and a decoration of Block must be aligned according to its extended alignment.
+
+    //     // NOTE: Every other member must be aligned according to its base alignment.
+    //     else => vkBaseAlign(array.child),
+    // },
+
+    // try std.testing.expectEqual(3 * @sizeOf(Real), vkBaseAlign([1]Vec3));
+}

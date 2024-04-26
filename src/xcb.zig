@@ -315,55 +315,55 @@ pub const XcbUi = struct {
 
         _ = c.xcb_flush(self.connection);
 
-        {
-            const first_keycode = setup.min_keycode;
-            const count = setup.max_keycode - setup.min_keycode;
+        // {
+        //     const first_keycode = setup.min_keycode;
+        //     const count = setup.max_keycode - setup.min_keycode;
 
-            // TODO: get mapping on MappingNotify
+        //     // TODO: get mapping on MappingNotify
 
-            const keyboard_mapping = c.xcb_get_keyboard_mapping(
-                self.connection,
-                first_keycode,
-                count,
-            );
-            const reply: *c.xcb_get_keyboard_mapping_reply_t = c.xcb_get_keyboard_mapping_reply(
-                self.connection,
-                keyboard_mapping,
-                null,
-            ) orelse return error.XcbKeyMap;
-            defer c.free(reply);
+        //     const keyboard_mapping = c.xcb_get_keyboard_mapping(
+        //         self.connection,
+        //         first_keycode,
+        //         count,
+        //     );
+        //     const reply: *c.xcb_get_keyboard_mapping_reply_t = c.xcb_get_keyboard_mapping_reply(
+        //         self.connection,
+        //         keyboard_mapping,
+        //         null,
+        //     ) orelse return error.XcbKeyMap;
+        //     defer c.free(reply);
 
-            const keysyms_per_keycode = reply.keysyms_per_keycode;
-            const keysyms = c.xcb_get_keyboard_mapping_keysyms(reply);
+        //     const keysyms_per_keycode = reply.keysyms_per_keycode;
+        //     const keysyms = c.xcb_get_keyboard_mapping_keysyms(reply);
 
-            // TODO: use global preallocated memory with max size
-            var keysym_map = std.AutoArrayHashMap(u32, []const u8).init(std.heap.page_allocator);
+        //     // TODO: use global preallocated memory with max size
+        //     var keysym_map = std.AutoArrayHashMap(u32, []const u8).init(std.heap.page_allocator);
 
-            // TODO: fill keysym map with, don't hardcode
-            // xkb_keysym_to_utf8(xkb_keysym_t keysym, char *buffer, size_t size)
-            try keysym_map.putNoClobber(0xff1b, "Escape");
+        //     // TODO: fill keysym map with, don't hardcode
+        //     // xkb_keysym_to_utf8(xkb_keysym_t keysym, char *buffer, size_t size)
+        //     try keysym_map.putNoClobber(0xff1b, "Escape");
 
-            for (first_keycode..(first_keycode + count)) |keycode| {
-                std.debug.print("Keycode {d} -> (", .{keycode});
-                const offset = (keycode - first_keycode) * keysyms_per_keycode;
-                for (0..keysyms_per_keycode) |i| {
-                    const index = offset + i;
-                    const keysym = keysyms[index];
-                    if (keysym == 0) {
-                        break;
-                    } else if (i != 0) {
-                        std.debug.print(" ", .{});
-                    }
+        //     for (first_keycode..(first_keycode + count)) |keycode| {
+        //         std.debug.print("Keycode {d} -> (", .{keycode});
+        //         const offset = (keycode - first_keycode) * keysyms_per_keycode;
+        //         for (0..keysyms_per_keycode) |i| {
+        //             const index = offset + i;
+        //             const keysym = keysyms[index];
+        //             if (keysym == 0) {
+        //                 break;
+        //             } else if (i != 0) {
+        //                 std.debug.print(" ", .{});
+        //             }
 
-                    if (keysym_map.get(keysym)) |name| {
-                        std.debug.print("{s}", .{name});
-                    } else {
-                        std.debug.print("{x}", .{keysym});
-                    }
-                }
-                std.debug.print(")\n", .{});
-            }
-        }
+        //             if (keysym_map.get(keysym)) |name| {
+        //                 std.debug.print("{s}", .{name});
+        //             } else {
+        //                 std.debug.print("{x}", .{keysym});
+        //             }
+        //         }
+        //         std.debug.print(")\n", .{});
+        //     }
+        // }
     }
 };
 
