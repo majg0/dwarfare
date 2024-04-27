@@ -36,6 +36,12 @@ const Archetype = struct {
         return Archetype{ .bit_set = bit_set };
     }
 
+    fn forStorage(self: Archetype) Archetype {
+        var bit_set = self.bit_set;
+        bit_set.set(World.component_index_entity);
+        return Archetype{ .bit_set = bit_set };
+    }
+
     fn has(self: *const Archetype, component_index: usize) bool {
         return self.bit_set.isSet(component_index);
     }
@@ -47,6 +53,10 @@ const Archetype = struct {
             }
         }
         unreachable;
+    }
+
+    fn component_count(self: Archetype) usize {
+        return self.bit_set.count();
     }
 };
 
@@ -124,10 +134,10 @@ const Query = struct {
     fn next(self: *Query) ?*Storage {
         const items = self.world.storages.list.items;
         while (self.storage_index < items.len) {
-            var storage = items[self.storage_index];
+            const storage = &items[self.storage_index];
             self.storage_index += 1;
             if (self.filter.match(storage.archetype)) {
-                return &storage;
+                return storage;
             }
         }
         return null;
@@ -143,14 +153,14 @@ const Entity = packed struct {
         // return lhs.index == rhs.index and lhs.generation == rhs.generation;
     }
 
-    fn pointer(self: Entity, world: *World) *const Pointer {
-        return world.entities.pointer(self);
+    fn getPointer(self: Entity, world: *const World) *Pointer {
+        return world.entities.getPointer(self);
     }
 };
 
 const Pointer = struct {
     storage_index: u32,
-    row: u32,
+    row_index: u32,
 
     fn storage(self: Pointer, world: *World) *Storage {
         return &world.storages.list.items[self.storage_index];
@@ -227,13 +237,13 @@ const Entities = struct {
         return entity.generation != self.generations[entity.index];
     }
 
-    fn pointer(self: *const Entities, entity: Entity) *Pointer {
+    fn getPointer(self: *const Entities, entity: Entity) *Pointer {
         assert(self.alive(entity));
         return &self.pointers[entity.index];
     }
 };
 
-test "entities" {
+test "entity allocation" {
     const expectEqual = std.testing.expectEqual;
     const expect = std.testing.expect;
 
@@ -264,13 +274,17 @@ test "entities" {
 }
 
 const World = struct {
+    const component_index_entity = 0;
+
     components: Registry(Component),
     storages: Registry(Storage),
     entities: Entities,
 
     fn init(allocator: Allocator) Allocator.Error!World {
+        var components = try Registry(Component).init(allocator, component_count_max);
+        assert(component_index_entity == components.register(Component.from_type(Entity)));
         return World{
-            .components = try Registry(Component).init(allocator, component_count_max),
+            .components = components,
             .storages = try Registry(Storage).init(allocator, storage_count_max),
             .entities = try Entities.init(allocator),
         };
@@ -287,25 +301,29 @@ const World = struct {
 
     fn create(self: *World, archetype: Archetype) Entity {
         const entity = self.entities.create();
-        assert(self.entities.pointer(entity).invalid());
+        assert(self.entities.getPointer(entity).invalid());
         self.move(entity, archetype);
-        assert(self.entities.pointer(entity).valid());
+        assert(self.entities.getPointer(entity).valid());
         return entity;
     }
 
     fn destroy(self: *World, entity: Entity) void {
-        const ptr = self.entities.pointer(entity);
-        ptr.storage(self).swapRemove(ptr.row);
+        const ptr = entity.getPointer(self);
+        ptr.storage(self).swapRemove(ptr.row_index);
         self.entities.destroy(entity);
     }
 
-    fn storage(self: *World, storage_index: u32) *Storage {
+    fn getComponent(self: *World, component_index: usize) *const Component {
+        return &self.components.list.items[component_index];
+    }
+
+    fn getStorage(self: *World, storage_index: u32) *Storage {
         return &self.storages.list.items[storage_index];
     }
 
     fn move(self: *World, entity: Entity, archetype: Archetype) void {
         assert(self.entities.alive(entity));
-        const ptr = self.entities.pointer(entity);
+        const ptr = self.entities.getPointer(entity);
         const storage_index_target = archetype.storageIndex(self);
         assert(storage_index_target < self.storages.list.items.len);
 
@@ -313,32 +331,27 @@ const World = struct {
             return;
         }
         if (ptr.valid()) {
-            self.storage(ptr.storage_index).swapRemove(ptr.row);
+            self.getStorage(ptr.storage_index).swapRemove(ptr.row_index);
             // TODO: move what can be moved
             unreachable;
         }
         ptr.storage_index = storage_index_target;
-        ptr.row = self.storage(storage_index_target).insert();
+        ptr.row_index = self.getStorage(storage_index_target).insert(entity);
     }
 
     fn get(self: *World, comptime T: type, entity: Entity, component_index: usize) *T {
-        const ptr = entity.pointer(self);
+        const ptr = entity.getPointer(self);
         const table = ptr.storage(self);
         assert(table.archetype.has(component_index));
-        return table.cell(T, ptr.row, component_index);
+        return table.get(T, ptr.row_index, component_index);
+    }
+
+    fn registerComponent(self: *World, comptime T: type) usize {
+        return self.components.register(Component.from_type(T));
     }
 
     fn createStorage(self: *World, allocator: Allocator, archetype: Archetype) Allocator.Error!*Storage {
-        {
-            // assert monotonically decreasing alignment
-            var iter = archetype.bit_set.iterator(.{});
-            var prev_alignment = self.components.list.items[iter.next() orelse unreachable].alignment;
-            while (iter.next()) |component_index| {
-                const component = self.components.list.items[component_index];
-                assert(prev_alignment >= component.alignment);
-                prev_alignment = component.alignment;
-            }
-        }
+        assert(archetype.has(component_index_entity));
 
         const entities_per_page: usize = blk: {
             var size_total: usize = 0;
@@ -349,26 +362,29 @@ const World = struct {
                 assert(component.size >= component.alignment);
                 size_total += component.size;
             }
-
             break :blk page_size / size_total;
         };
 
         var prev_offset: usize = 0;
-        const columns = try allocator.alloc(Storage.Column, archetype.bit_set.count());
+        const component_count = archetype.component_count();
+        const column_infos = try allocator.alloc(
+            Storage.ColumnInfo,
+            component_count,
+        );
 
         {
             var iter = archetype.bit_set.iterator(.{});
-            for (columns) |*column| {
+            for (column_infos) |*column_info| {
                 const elem = iter.next();
                 assert(elem != null);
                 const component_index = elem.?;
-                const component = self.components.list.items[component_index];
+                const component = self.getComponent(component_index);
                 // NOTE: you may affect this by reordering the registration of components
                 assert(component.size >= component.alignment);
                 prev_offset = std.mem.alignForward(usize, prev_offset, component.alignment);
-                column.offset = prev_offset;
-                column.size = component.size;
-                column.component_index = component_index;
+                column_info.offset = prev_offset;
+                column_info.size = component.size;
+                column_info.component_index = component_index;
                 prev_offset += component.size * entities_per_page;
             }
             assert(iter.next() == null);
@@ -377,7 +393,7 @@ const World = struct {
         const index = self.storages.register(Storage{
             .world = self,
             .archetype = archetype,
-            .columns = columns,
+            .column_infos = column_infos,
             .pages = undefined,
             .entities_per_page = entities_per_page,
             .count_used = 0,
@@ -390,27 +406,75 @@ const World = struct {
     }
 };
 
+const Rows = struct {
+    page: *Storage.Page,
+    entity_count: usize,
+
+    fn get(self: *const Rows, comptime T: type, component_index: usize) []T {
+        return self.page.slice(T, component_index, self.entity_count);
+    }
+};
+
+const RowsIterator = struct {
+    storage: *Storage,
+    page_count: usize,
+    page_index: usize,
+
+    fn init(storage: *Storage) RowsIterator {
+        return RowsIterator{
+            .storage = storage,
+            .page_count = std.math.divCeil(
+                usize,
+                storage.count_used,
+                storage.entities_per_page,
+            ) catch unreachable,
+            .page_index = 0,
+        };
+    }
+
+    fn next(self: *RowsIterator) ?Rows {
+        if (self.page_index == self.page_count) {
+            return null;
+        }
+        const page = &self.storage.pages[self.page_index];
+        self.page_index += 1;
+        if (self.page_index == self.page_count) {
+            const entity_count = self.storage.count_used % self.storage.entities_per_page;
+            return Rows{ .page = page, .entity_count = entity_count };
+        }
+        return Rows{ .page = page, .entity_count = page.entity_count };
+    }
+};
+
 const Storage = struct {
     const Page = struct {
         storage: *Storage,
         data: []align(page_size) u8,
         entity_count: usize,
 
-        pub fn slice(self: *const Page, component_index: usize, comptime T: type) []T {
-            const column = self.storage.columnOf(component_index);
-            const begin = column.offset;
-            const end = column.offset + column.size * self.entity_count;
+        fn slice(self: *const Page, comptime T: type, component_index: usize, entity_count: usize) []T {
+            assert(entity_count <= self.entity_count);
+            const column_info = self.storage.columnInfo(component_index);
+            const begin = column_info.offset;
+            const end = column_info.offset + column_info.size * entity_count;
             return @alignCast(std.mem.bytesAsSlice(T, self.data[begin..end]));
         }
 
-        pub fn get(self: *const Page, column: Column, index: usize) []u8 {
-            const begin = column.offset + index * column.size;
-            const end = column.offset + index * column.size + column.size;
+        pub fn sliceFull(self: *const Page, comptime T: type, component_index: usize) []T {
+            const column_info = self.storage.columnInfo(component_index);
+            const begin = column_info.offset;
+            const end = column_info.offset + column_info.size * self.entity_count;
+            return @alignCast(std.mem.bytesAsSlice(T, self.data[begin..end]));
+        }
+
+        pub fn get(self: *const Page, column_info: ColumnInfo, index: usize) []u8 {
+            const begin = column_info.offset + index * column_info.size;
+            const end = column_info.offset + index * column_info.size + column_info.size;
             return self.data[begin..end];
         }
     };
 
-    const Column = struct {
+    const ColumnInfo = struct {
         component_index: usize,
         offset: usize,
         size: usize,
@@ -418,20 +482,24 @@ const Storage = struct {
 
     world: *World,
     archetype: Archetype,
-    columns: []const Column,
+    column_infos: []const ColumnInfo,
     pages: []Page,
     entities_per_page: usize,
     count_used: u32,
 
-    fn columnOf(self: *const Storage, component_index: usize) Column {
+    fn rowsIterator(self: *Storage) RowsIterator {
+        return RowsIterator.init(self);
+    }
+
+    fn columnInfo(self: *const Storage, component_index: usize) ColumnInfo {
         // NOTE: this is a bit of magic but it makes sense if you think about it :)
         //
         // Given:
-        // component_index = 2
+        // component_index = 3
         //                    this is the index bit
         //                    v
-        // archetype       = 0110
-        //                     ^^
+        // archetype       = 01101
+        //                     ^^^
         //                     these are the components with smaller indices
         //
         // The number of 1 bits to the right of the index coincides with the offset index.
@@ -442,46 +510,63 @@ const Storage = struct {
 
         // Then we simply mask off and count the bits
         const index = @popCount(self.archetype.bit_set.mask & mask);
-        const column = self.columns[index];
-        assert(column.component_index == component_index);
-        return column;
+        const column_info = self.column_infos[index];
+        assert(column_info.component_index == component_index);
+        return column_info;
     }
 
-    fn insert(self: *Storage) u32 {
+    fn insert(self: *Storage, entity: Entity) u32 {
         assert(self.count_used < entity_count_max);
-        const row = self.count_used;
+        const row_index = self.count_used;
+        self.get(Entity, row_index, World.component_index_entity).* = entity;
         self.count_used += 1;
-        return row;
+        return row_index;
     }
 
-    fn cell(self: *const Storage, comptime T: type, row: usize, component_index: usize) *T {
+    fn get(self: *const Storage, comptime T: type, row_index: usize, component_index: usize) *T {
         return @alignCast(@ptrCast(
-            self.pages[row / self.entities_per_page].get(
-                self.columnOf(component_index),
-                row % self.entities_per_page,
+            self.pages[row_index / self.entities_per_page].get(
+                self.columnInfo(component_index),
+                row_index % self.entities_per_page,
             ),
         ));
     }
 
-    fn swapRemove(self: *Storage, row: usize) void {
-        assert(row < self.count_used);
+    fn swapRemove(self: *Storage, row_index: u32) void {
+        assert(row_index < self.count_used);
         self.count_used -= 1;
 
-        const page_last = self.pages[self.pages.len - 1];
-        const index_last = page_last.entity_count - 1;
-        const page_stale = self.pages[row / self.entities_per_page];
-        const index_stale = row % self.entities_per_page;
+        const swap_row_index = self.count_used;
+        if (swap_row_index == row_index) {
+            return;
+        }
 
-        for (self.columns) |column| {
-            const last = page_last.get(column, index_last);
-            const stale = page_stale.get(column, index_stale);
+        const page_last = self.pages[row_index / self.entities_per_page];
+        const subindex_last = swap_row_index % self.entities_per_page;
+        const page_stale = self.pages[row_index / self.entities_per_page];
+        const subindex_stale = row_index % self.entities_per_page;
+
+        for (self.column_infos) |column_info| {
+            const last = page_last.get(column_info, subindex_last);
+            const stale = page_stale.get(column_info, subindex_stale);
             @memcpy(stale, last);
         }
+
+        // NOTE: there's a new entity in the old position; update that entity's pointer.
+        self.getEntity(row_index).getPointer(self.world).row_index = row_index;
+    }
+
+    fn getEntity(self: *const Storage, row_index: usize) *Entity {
+        return self.get(Entity, row_index, World.component_index_entity);
     }
 
     fn init(self: *Storage, allocator: Allocator) Allocator.Error!void {
         var entity_count_remaining: usize = entity_count_max;
-        const page_count = (entity_count_max - 1) / self.entities_per_page + 1;
+        const page_count = std.math.divCeil(
+            usize,
+            entity_count_max,
+            self.entities_per_page,
+        ) catch unreachable;
         self.pages = try allocator.alloc(Storage.Page, page_count);
         for (self.pages) |*page| {
             const count = @min(entity_count_remaining, self.entities_per_page);
@@ -502,19 +587,21 @@ const Storage = struct {
     }
 };
 
-const Player = struct {
-    name: []const u8,
-    location: Vec3,
-    velocity: Vec3,
-    health: u8,
-};
-
-const Cat = struct {
-    name: []const u8,
-    location: Vec3,
-};
-
 test "ecs" {
+    const t = std.testing;
+
+    const Player = struct {
+        name: []const u8,
+        location: Vec3,
+        velocity: Vec3,
+        health: u8,
+    };
+
+    const Cat = struct {
+        name: []const u8,
+        location: Vec3,
+    };
+
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -523,12 +610,12 @@ test "ecs" {
     defer world.deinit(allocator);
 
     // register components
-    const component_player = world.components.register(Component.from_type(Player));
-    const component_cat = world.components.register(Component.from_type(Cat));
+    const component_player = world.registerComponent(Player);
+    const component_cat = world.registerComponent(Cat);
 
     // create archetypes
-    const archetype_player = Archetype.init().with(component_player);
-    const archetype_cat_player = Archetype.init().with(component_cat).with(component_player);
+    const archetype_player = Archetype.init().with(component_player).forStorage();
+    const archetype_cat_player = Archetype.init().with(component_cat).with(component_player).forStorage();
 
     // create storages
     const storage_player = try world.createStorage(allocator, archetype_player);
@@ -538,82 +625,90 @@ test "ecs" {
     {
         var entity_count: usize = 0;
         for (storage_cat_player.pages) |*page| {
-            const cats = page.slice(component_cat, Cat);
-            const players = page.slice(component_player, Player);
-            assert(cats.len == players.len);
-            entity_count += cats.len;
+            const entities = page.sliceFull(Entity, World.component_index_entity);
+            const cats = page.sliceFull(Cat, component_cat);
+            const players = page.sliceFull(Player, component_player);
+            try t.expectEqual(cats.len, players.len);
+            try t.expectEqual(entities.len, cats.len);
+            entity_count += entities.len;
         }
-        assert(entity_count == entity_count_max);
+        try t.expectEqual(entity_count_max, entity_count);
     }
     {
         var entity_count: usize = 0;
         for (storage_player.pages) |*page| {
-            const players = page.slice(component_player, Player);
+            const players = page.sliceFull(Player, component_player);
             entity_count += players.len;
         }
-        assert(entity_count == entity_count_max);
+        try t.expectEqual(entity_count_max, entity_count);
     }
 
     // query inclusion
     {
         var query = world.query(Filter.init().with(component_player));
-        var count: u8 = 0;
+        var storage_count: u8 = 0;
         while (query.next() != null) {
-            count += 1;
+            storage_count += 1;
         }
-        assert(count == 2);
+        try t.expectEqual(2, storage_count);
     }
 
     // query exclusion
     {
         var query = world.query(Filter.init().with(component_player).without(component_cat));
-        var count: u8 = 0;
+        var storage_count: u8 = 0;
         while (query.next() != null) {
-            count += 1;
+            storage_count += 1;
         }
-        assert(count == 1);
+        try t.expectEqual(1, storage_count);
     }
 
-    // foo
+    // entities
     {
-        const t = std.testing;
         try t.expectEqual(0, storage_player.count_used);
 
         const e1 = world.create(archetype_player);
         try t.expect(world.entities.alive(e1));
         try t.expectEqual(1, storage_player.count_used);
+        try t.expectEqual(0, e1.getPointer(&world).row_index);
 
         const e2 = world.create(archetype_player);
         try t.expect(world.entities.alive(e2));
         try t.expectEqual(2, storage_player.count_used);
+        try t.expectEqual(1, e2.getPointer(&world).row_index);
 
         const p1 = world.get(Player, e1, component_player);
         const p2 = world.get(Player, e2, component_player);
 
         p1.health = 3;
+        p2.health = 4;
 
-        const size = @sizeOf(Player);
         {
-            const slice = storage_player.pages[0].data[0..size];
-            const p = @as(*Player, @ptrCast(slice.ptr));
-            try t.expectEqual(@sizeOf(Player), slice.len);
-            try t.expectEqual(p1, p);
+            var query = world.query(Filter.init().with(component_player));
+            var health_sum: u8 = 0;
+            // TODO: make this smoother by directly returning Rows from the Query
+            while (query.next()) |storage| {
+                var rowsIterator = storage.rowsIterator();
+                while (rowsIterator.next()) |rows| {
+                    for (rows.get(Player, component_player)) |player| {
+                        health_sum += player.health;
+                    }
+                }
+            }
+            try t.expectEqual(7, health_sum);
         }
-        {
-            const slice = storage_player.pages[0].data[size .. size * 2];
-            const p = @as(*Player, @ptrCast(slice.ptr));
-            try t.expectEqual(@sizeOf(Player), slice.len);
-            try t.expectEqual(p2, p);
-        }
+
+        const e_stored = storage_player.get(Entity, 1, World.component_index_entity);
+        try t.expectEqual(e2, e_stored.*);
+
+        try t.expectEqual(0, e1.getPointer(&world).row_index);
+        try t.expectEqual(1, e2.getPointer(&world).row_index);
         // NOTE: destroy without mirroring order to test swap remove
-
-        try t.expectEqual(0, e1.pointer(&world).row);
-        try t.expectEqual(1, e2.pointer(&world).row);
         world.destroy(e1);
         try t.expect(world.entities.dead(e1));
         try t.expectEqual(1, storage_player.count_used);
         // e1 was not last so it should've swapped with e2; ensure e2's pointer was updated
-        try t.expectEqual(0, e2.pointer(&world).row);
+        try t.expectEqual(0, e2.getPointer(&world).row_index);
 
         world.destroy(e2);
         try t.expect(world.entities.dead(e2));
