@@ -122,24 +122,43 @@ const Query = struct {
     filter: Filter,
     storage_index: usize,
     world: *const World,
+    rows_iterator: ?RowsIterator,
 
     fn init(filter: Filter, world: *const World) Query {
         return Query{
             .world = world,
             .filter = filter,
             .storage_index = 0,
+            .rows_iterator = null,
         };
     }
 
-    fn next(self: *Query) ?*Storage {
-        const items = self.world.storages.list.items;
-        while (self.storage_index < items.len) {
-            const storage = &items[self.storage_index];
-            self.storage_index += 1;
-            if (self.filter.match(storage.archetype)) {
-                return storage;
+    fn next(self: *Query) ?Rows {
+        if (self.rows_iterator == null) {
+            const storages = self.world.storages.list.items;
+            while (self.storage_index < storages.len) {
+                const storage_candidate = &storages[self.storage_index];
+                self.storage_index += 1;
+                if (self.filter.match(storage_candidate.archetype)) {
+                    self.rows_iterator = storage_candidate.rowsIterator();
+                    break;
+                }
+            } else {
+                return null;
             }
         }
+
+        assert(self.rows_iterator != null);
+
+        var rows_iterator = &self.rows_iterator.?;
+
+        if (rows_iterator.next()) |rows| {
+            if (rows_iterator.last_page()) {
+                self.rows_iterator = null;
+            }
+            return rows;
+        }
+
         return null;
     }
 };
@@ -432,13 +451,17 @@ const RowsIterator = struct {
         };
     }
 
+    fn last_page(self: *const RowsIterator) bool {
+        return self.page_index == self.page_count;
+    }
+
     fn next(self: *RowsIterator) ?Rows {
-        if (self.page_index == self.page_count) {
+        if (self.last_page()) {
             return null;
         }
         const page = &self.storage.pages[self.page_index];
         self.page_index += 1;
-        if (self.page_index == self.page_count) {
+        if (self.last_page()) {
             const entity_count = self.storage.count_used % self.storage.entities_per_page;
             return Rows{ .page = page, .entity_count = entity_count };
         }
@@ -643,26 +666,6 @@ test "ecs" {
         try t.expectEqual(entity_count_max, entity_count);
     }
 
-    // query inclusion
-    {
-        var query = world.query(Filter.init().with(component_player));
-        var storage_count: u8 = 0;
-        while (query.next() != null) {
-            storage_count += 1;
-        }
-        try t.expectEqual(2, storage_count);
-    }
-
-    // query exclusion
-    {
-        var query = world.query(Filter.init().with(component_player).without(component_cat));
-        var storage_count: u8 = 0;
-        while (query.next() != null) {
-            storage_count += 1;
-        }
-        try t.expectEqual(1, storage_count);
-    }
-
     // entities
     {
         try t.expectEqual(0, storage_player.count_used);
@@ -677,25 +680,32 @@ test "ecs" {
         try t.expectEqual(2, storage_player.count_used);
         try t.expectEqual(1, e2.getPointer(&world).row_index);
 
+        const e3 = world.create(archetype_cat_player);
+        try t.expect(world.entities.alive(e2));
+        try t.expectEqual(2, storage_player.count_used);
+        try t.expectEqual(1, e2.getPointer(&world).row_index);
+
         const p1 = world.get(Player, e1, component_player);
         const p2 = world.get(Player, e2, component_player);
+        const p3 = world.get(Player, e3, component_player);
 
         p1.health = 3;
-        p2.health = 4;
+        p2.health = 5;
+        p3.health = 7;
 
         {
-            var query = world.query(Filter.init().with(component_player));
-            var health_sum: u8 = 0;
-            // TODO: make this smoother by directly returning Rows from the Query
-            while (query.next()) |storage| {
-                var rowsIterator = storage.rowsIterator();
-                while (rowsIterator.next()) |rows| {
-                    for (rows.get(Player, component_player)) |player| {
-                        health_sum += player.health;
-                    }
+            var query = world.query(Filter.init()
+                .with(component_player)
+                .without(component_cat));
+            var sum: u32 = 0;
+            while (query.next()) |rows| {
+                const entities = rows.get(Entity, World.component_index_entity);
+                const players = rows.get(Player, component_player);
+                for (entities, players) |entity, player| {
+                    sum += (entity.index + 1) * player.health;
                 }
             }
-            try t.expectEqual(7, health_sum);
+            try t.expectEqual((0 + 1) * 3 + (1 + 1) * 5, sum);
         }
 
         const e_stored = storage_player.get(Entity, 1, World.component_index_entity);
