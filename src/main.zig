@@ -145,9 +145,6 @@ const CliConfig = union(enum) {
     dedicated: union(enum) {
         run: struct {},
     },
-    replay: union(enum) {
-        run: struct {},
-    },
 };
 
 pub fn main() !void {
@@ -168,7 +165,6 @@ pub fn main() !void {
     switch (config) {
         .game => {},
         .dedicated => unreachable,
-        .replay => {},
     }
 
     var sys: Systems = undefined;
