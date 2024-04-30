@@ -2,8 +2,15 @@ const std = @import("std");
 const c = @cImport({
     @cInclude("stdlib.h");
     @cInclude("xcb/xcb.h");
+    @cInclude("xcb/xkb.h");
+    @cInclude("xkbcommon/xkbcommon.h");
+    @cInclude("xkbcommon/xkbcommon-x11.h");
 });
 const Input = @import("input.zig").Input;
+
+// TODO: check replies across function calls in this file, no _ =
+
+const assert = std.debug.assert;
 
 // DOCS: https://www.x.org/releases/X11R7.5/doc/x11proto/proto.pdf
 // DOCS: https://specifications.freedesktop.org/wm-spec/1.4/ar01s05.html
@@ -14,6 +21,12 @@ pub const XcbUi = struct {
     connection: *c.struct_xcb_connection_t = @ptrFromInt(int_invalid),
     window: c.xcb_window_t = int_invalid,
     wm_delete_window_atom: c.xcb_atom_t = int_invalid,
+    xkb_context: *c.xkb_context,
+    xkb_keymap: *c.xkb_keymap,
+    xkb_state: *c.xkb_state,
+    xkb_base_event: u8,
+    xkb_base_error: u8,
+    xkb_device_id: i32,
 
     pub fn eventsPoll(self: *XcbUi, input: *Input) void {
         for (0..100) |_| {
@@ -30,6 +43,21 @@ pub const XcbUi = struct {
                     const e: *c.xcb_key_press_event_t = @ptrCast(generic_event);
                     std.debug.print("0x{X} KeyPress {} state:0b{b} ({},{}) root:({},{})\n", .{ e.event, e.detail, e.state, e.event_x, e.event_y, e.root_x, e.root_y });
                     input.keys.set(e.detail);
+
+                    {
+                        const keysym = c.xkb_state_key_get_one_sym(self.xkb_state, e.detail);
+                        var keysym_name = std.mem.zeroes([64:0]u8);
+                        const result = c.xkb_keysym_get_name(keysym, &keysym_name, keysym_name.len);
+                        std.debug.print("\nGOT KEYSYM {s}\n", .{keysym_name});
+                        assert(result != -1);
+                    }
+
+                    {
+                        var keysym_text = std.mem.zeroes([64:0]u8);
+                        const result = c.xkb_state_key_get_utf8(self.xkb_state, e.detail, &keysym_text, keysym_text.len);
+                        std.debug.print("GOT TEXT \"{s}\"\n", .{keysym_text});
+                        assert(result != -1);
+                    }
                 },
                 c.XCB_KEY_RELEASE => {
                     const e: *c.xcb_key_release_event_t = @ptrCast(generic_event);
@@ -184,22 +212,69 @@ pub const XcbUi = struct {
                     }
                 },
                 else => {
-                    std.debug.print("WARNING: unhandled event {}\n", .{generic_event.response_type});
+                    if (response_type == self.xkb_base_event + c.XCB_XKB_NEW_KEYBOARD_NOTIFY) {
+                        const e: *const c.xcb_xkb_new_keyboard_notify_event_t = @ptrCast(generic_event);
+                        std.debug.print("XkbNewKeyboardNotify {}\n", .{e.deviceID});
+                        // TODO: no catch
+                        self.xkb_recreate() catch {};
+                    } else if (response_type == self.xkb_base_event + c.XCB_XKB_MAP_NOTIFY) {
+                        const e: *const c.xcb_xkb_map_notify_event_t = @ptrCast(generic_event);
+                        std.debug.print("XkbMapNotify {}\n", .{e.deviceID});
+                        // TODO: no catch
+                        self.xkb_recreate() catch {};
+                    } else if (response_type == self.xkb_base_event + c.XCB_XKB_STATE_NOTIFY) {
+                        const e: *const c.xcb_xkb_state_notify_event_t = @ptrCast(generic_event);
+                        std.debug.print("XkbStateNotify {}\n", .{e.deviceID});
+                        _ = c.xkb_state_update_mask(
+                            self.xkb_state,
+                            e.mods,
+                            e.latchedMods,
+                            e.lockedMods,
+                            @intCast(e.baseGroup),
+                            @intCast(e.latchedGroup),
+                            @intCast(e.lockedGroup),
+                        );
+                    } else {
+                        std.debug.print("WARNING: unhandled event {}\n", .{response_type});
+                    }
                 },
             }
         }
     }
 
+    fn xkb_recreate(self: *XcbUi) error{ XkbKeymapNewError, XkbStateNewError }!void {
+        c.xkb_keymap_unref(self.xkb_keymap);
+        c.xkb_state_unref(self.xkb_state);
+
+        self.xkb_keymap = c.xkb_x11_keymap_new_from_device(
+            self.xkb_context,
+            self.connection,
+            self.xkb_device_id,
+            c.XKB_KEYMAP_COMPILE_NO_FLAGS,
+        ) orelse return error.XkbKeymapNewError;
+
+        self.xkb_state = c.xkb_x11_state_new_from_device(
+            self.xkb_keymap,
+            self.connection,
+            self.xkb_device_id,
+        ) orelse return error.XkbStateNewError;
+    }
+
     pub fn kill(self: XcbUi) void {
         c.xcb_disconnect(self.connection);
+        {
+            c.xkb_state_unref(self.xkb_state);
+            c.xkb_keymap_unref(self.xkb_keymap);
+            c.xkb_context_unref(self.xkb_context);
+        }
     }
 
     pub fn init(self: *XcbUi) !void {
         std.debug.print("\n=== XCB ===\n", .{});
 
-        self.connection = c.xcb_connect(null, null) orelse {
+        self.connection = c.xcb_connect(null, null) orelse
             return error.XcbConnectionMissing;
-        };
+
         std.debug.assert(self.connection != @as(*c.xcb_connection_t, @ptrFromInt(int_invalid)));
 
         if (c.xcb_connection_has_error(self.connection) != 0) {
@@ -315,55 +390,54 @@ pub const XcbUi = struct {
 
         _ = c.xcb_flush(self.connection);
 
-        // {
-        //     const first_keycode = setup.min_keycode;
-        //     const count = setup.max_keycode - setup.min_keycode;
+        {
+            self.xkb_context = c.xkb_context_new(c.XKB_CONTEXT_NO_FLAGS) orelse
+                return error.XkbContextNewError;
 
-        //     // TODO: get mapping on MappingNotify
+            {
+                const result = c.xkb_x11_setup_xkb_extension(
+                    self.connection,
+                    c.XKB_X11_MIN_MAJOR_XKB_VERSION,
+                    c.XKB_X11_MIN_MINOR_XKB_VERSION,
+                    c.XKB_X11_SETUP_XKB_EXTENSION_NO_FLAGS,
+                    null,
+                    null,
+                    &self.xkb_base_event,
+                    &self.xkb_base_error,
+                );
+                assert(result == 1);
+            }
 
-        //     const keyboard_mapping = c.xcb_get_keyboard_mapping(
-        //         self.connection,
-        //         first_keycode,
-        //         count,
-        //     );
-        //     const reply: *c.xcb_get_keyboard_mapping_reply_t = c.xcb_get_keyboard_mapping_reply(
-        //         self.connection,
-        //         keyboard_mapping,
-        //         null,
-        //     ) orelse return error.XcbKeyMap;
-        //     defer c.free(reply);
+            self.xkb_device_id = c.xkb_x11_get_core_keyboard_device_id(self.connection);
+            if (self.xkb_device_id == -1) {
+                return error.XkbKeyboardDeviceError;
+            }
 
-        //     const keysyms_per_keycode = reply.keysyms_per_keycode;
-        //     const keysyms = c.xcb_get_keyboard_mapping_keysyms(reply);
+            self.xkb_keymap = c.xkb_x11_keymap_new_from_device(
+                self.xkb_context,
+                self.connection,
+                self.xkb_device_id,
+                c.XKB_KEYMAP_COMPILE_NO_FLAGS,
+            ) orelse return error.XkbKeymapNewError;
 
-        //     // TODO: use global preallocated memory with max size
-        //     var keysym_map = std.AutoArrayHashMap(u32, []const u8).init(std.heap.page_allocator);
+            self.xkb_state = c.xkb_x11_state_new_from_device(
+                self.xkb_keymap,
+                self.connection,
+                self.xkb_device_id,
+            ) orelse return error.XkbStateNewError;
 
-        //     // TODO: fill keysym map with, don't hardcode
-        //     // xkb_keysym_to_utf8(xkb_keysym_t keysym, char *buffer, size_t size)
-        //     try keysym_map.putNoClobber(0xff1b, "Escape");
-
-        //     for (first_keycode..(first_keycode + count)) |keycode| {
-        //         std.debug.print("Keycode {d} -> (", .{keycode});
-        //         const offset = (keycode - first_keycode) * keysyms_per_keycode;
-        //         for (0..keysyms_per_keycode) |i| {
-        //             const index = offset + i;
-        //             const keysym = keysyms[index];
-        //             if (keysym == 0) {
-        //                 break;
-        //             } else if (i != 0) {
-        //                 std.debug.print(" ", .{});
-        //             }
-
-        //             if (keysym_map.get(keysym)) |name| {
-        //                 std.debug.print("{s}", .{name});
-        //             } else {
-        //                 std.debug.print("{x}", .{keysym});
-        //             }
-        //         }
-        //         std.debug.print(")\n", .{});
-        //     }
-        // }
+            const mask = c.XCB_XKB_EVENT_TYPE_NEW_KEYBOARD_NOTIFY | c.XCB_XKB_EVENT_TYPE_MAP_NOTIFY | c.XCB_XKB_EVENT_TYPE_STATE_NOTIFY;
+            _ = c.xcb_xkb_select_events_aux(
+                self.connection,
+                @intCast(self.xkb_device_id),
+                mask,
+                0,
+                mask,
+                0,
+                0,
+                null,
+            );
+        }
     }
 };
 

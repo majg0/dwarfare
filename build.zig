@@ -44,6 +44,9 @@ pub fn build(b: *std.Build) void {
             {
                 exe_compile.linkLibC();
                 exe_compile.linkSystemLibrary("xcb");
+                exe_compile.linkSystemLibrary("xcb-xkb");
+                exe_compile.linkSystemLibrary("xkbcommon");
+                exe_compile.linkSystemLibrary("xkbcommon-x11");
                 exe_compile.linkSystemLibrary("vulkan");
                 exe_compile.linkSystemLibrary("asound");
             }
