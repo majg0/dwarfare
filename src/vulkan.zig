@@ -959,8 +959,7 @@ pub const Vulkan = struct {
                 ),
             };
 
-            const ptr: *UniformBufferObject = @ptrCast(@alignCast(self.mapped_memory_ubo[self.swapchain_frame_index_draw]));
-            ptr.* = ubo;
+            vkMemcpy(self.mapped_memory_ubo[self.swapchain_frame_index_draw], &ubo);
             std.debug.assert(self.device_memory[device_memory_index_host_staging] != null);
         }
 
@@ -1730,7 +1729,12 @@ pub const Vulkan = struct {
                         allocation_size,
                         memory_requirements.alignment,
                     );
-                    std.debug.print("      - index:{}, offset:{}, size:{}\n", .{ buffer_index, allocation_size, memory_requirements.size });
+                    std.debug.print("      - index:{}, offset:{}, size:{}, alignment:{}\n", .{
+                        buffer_index,
+                        allocation_size,
+                        memory_requirements.size,
+                        memory_requirements.alignment,
+                    });
                     self.buffer_mapping[buffer_index] = .{
                         .offset = allocation_size,
                         .size = memory_requirements.size,
@@ -1838,7 +1842,7 @@ pub const Vulkan = struct {
                 &data,
             ));
             std.debug.assert(data != null);
-            @memcpy(@as([*]u8, @ptrCast(@alignCast(data))), std.mem.asBytes(&staging_data));
+            vkMemcpy(data, &staging_data);
             c.vkUnmapMemory(self.device, self.device_memory[device_memory_index_host_staging]);
         }
 
@@ -2288,4 +2292,13 @@ test "vulkan alignment" {
     // },
 
     // try std.testing.expectEqual(3 * @sizeOf(Real), vkBaseAlign([1]Vec3));
+}
+
+fn vkMemcpy(destination: ?*anyopaque, source: anytype) void {
+    std.debug.assert(@typeInfo(@TypeOf(source)) == .Pointer);
+    // NOTE: memcpy, rather than a write to the pointer, does not require zig's stricter alignment, which may be violated by vulkan
+    @memcpy(
+        @as([*]u8, @ptrCast(destination)),
+        std.mem.asBytes(source),
+    );
 }
