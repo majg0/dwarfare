@@ -32,7 +32,7 @@ fn SrcWatcher() type {
             };
         }
 
-        fn poll_writes(self: *Self) bool {
+        fn change_detected(self: *Self) bool {
             const bytes_read = linux.read(
                 self.fd,
                 &self.event_buf,
@@ -59,41 +59,71 @@ fn SrcWatcher() type {
     };
 }
 
-const Lib = struct {
-    const path_len_max = 256;
+const GameLoader = struct {
+    const GameStatePtr = *anyopaque;
+    const path_len_max = std.fs.max_path_bytes;
 
     path_buf: [path_len_max:0]u8,
     path: []u8,
-    dyn: ?std.DynLib,
-    // fingerprint: i128,
-    update: *const fn () void = undefined,
 
-    // TODO: or absolute path
-    fn init() Lib {
-        return Lib{
-            .path_buf = std.mem.zeroes([path_len_max:0]u8),
-            .path = "",
-            .dyn = null,
-        };
-    }
+    lib: ?std.DynLib,
 
-    fn set_path(lib: *Lib, path: []const u8) void {
+    game_state: GameStatePtr,
+    gameInit: *const fn (*const std.mem.Allocator) GameStatePtr,
+    gameReload: *const fn (GameStatePtr) void,
+    gameTick: *const fn (GameStatePtr) void,
+    gameRenderVideo: *const fn (GameStatePtr) void,
+    gameRenderAudio: *const fn (GameStatePtr) void,
+
+    fn init(self: *GameLoader, path: []const u8, allocator: *const std.mem.Allocator) std.DynLib.Error!void {
+        self.path_buf = std.mem.zeroes([path_len_max:0]u8);
         if (std.fs.path.isAbsolute(path)) {
             assert(path.len >= path_len_max);
-            @memcpy(&lib.path_buf, path.ptr);
+            @memcpy(&self.path_buf, path.ptr);
         } else {
-            lib.path = std.fs.realpath(path, &lib.path_buf) catch unreachable;
+            self.path = std.fs.realpath(path, &self.path_buf) catch unreachable;
+        }
+
+        try self.lib_load();
+        self.game_state = self.gameInit(allocator);
+    }
+
+    fn tick(self: *GameLoader) void {
+        self.gameTick(self.game_state);
+    }
+    fn renderVideo(self: *GameLoader) void {
+        self.gameRenderVideo(self.game_state);
+    }
+    fn renderAudio(self: *GameLoader) void {
+        self.gameRenderAudio(self.game_state);
+    }
+
+    fn lib_load(self: *GameLoader) std.DynLib.Error!void {
+        self.lib = try std.DynLib.open(self.path);
+        self.gameInit = self.lib.?.lookup(@TypeOf(self.gameInit), "gameInit") orelse unreachable;
+        self.gameReload = self.lib.?.lookup(@TypeOf(self.gameReload), "gameReload") orelse unreachable;
+        self.gameTick = self.lib.?.lookup(@TypeOf(self.gameTick), "gameTick") orelse unreachable;
+        self.gameRenderVideo = self.lib.?.lookup(@TypeOf(self.gameRenderVideo), "gameRenderVideo") orelse unreachable;
+        self.gameRenderAudio = self.lib.?.lookup(@TypeOf(self.gameRenderAudio), "gameRenderAudio") orelse unreachable;
+    }
+
+    fn recompileAndReload(self: *GameLoader, allocator: *const std.mem.Allocator) (std.ChildProcess.SpawnError || std.DynLib.Error)!void {
+        if (builtin.mode == .Debug) {
+            {
+                var game_compile = std.ChildProcess.init(
+                    &.{ "zig", "build", "-Dgame_only=true" },
+                    allocator.*,
+                );
+                _ = try game_compile.spawnAndWait();
+            }
+            self.lib_unload();
+            try self.lib_load();
+            self.gameReload(self.game_state);
         }
     }
 
-    fn reload(lib: *Lib) std.DynLib.Error!void {
-        lib.unload();
-        lib.dyn = try std.DynLib.open(lib.path);
-        lib.update = lib.dyn.?.lookup(@TypeOf(lib.update), "update") orelse unreachable;
-    }
-
-    fn unload(lib: *Lib) void {
-        if (lib.dyn) |*dyn| {
+    fn lib_unload(self: *GameLoader) void {
+        if (self.lib) |*dyn| {
             dyn.close();
         }
     }
@@ -101,47 +131,45 @@ const Lib = struct {
 
 pub fn main() !void {
     // mem
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+
+    const page_allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(page_allocator);
     defer arena.deinit();
+
     const allocator = arena.allocator();
+    // NOTE: pre-allocate 1 GiB; we should never have to touch it again
+    {
+        const pages = try allocator.alignedAlloc(u8, std.mem.page_size, 1 * 1024 * 1024 * 1024);
+        allocator.free(pages);
+    }
 
-    // io
-    const stdout = std.io.getStdOut();
-    var bw = std.io.bufferedWriter(stdout.writer());
-    const w = bw.writer();
+    // game loader
+    var game_loader: GameLoader = undefined;
+    {
+        const lib_dir = switch (builtin.mode) {
+            .Debug => "zig-out/lib/",
+            else => @compileError("where will the game library reside relative to the loader?"),
+        };
+        const lib_name = switch (builtin.os.tag) {
+            .linux => "libdwarfare.so",
+            else => @compileError("what is the game library called on this os?"),
+        };
+        const path = lib_dir ++ lib_name;
+        try game_loader.init(path, &allocator);
+    }
+    defer game_loader.lib_unload();
 
-    // game
-    const dir_relative = "zig-out/lib/";
-    const name = switch (builtin.os.tag) {
-        .linux => "libdwarfare.so",
-        else => @compileError("what is the game library called on this os?"),
-    };
-    const path_relative = dir_relative ++ name;
-    var lib = Lib.init();
-    lib.set_path(path_relative);
-    std.debug.print("{s}\n", .{lib.path});
-    try lib.reload();
-    defer lib.unload();
+    // src watcher
+    var src_watcher = SrcWatcher().init();
+    defer src_watcher.deinit();
 
-    // hotswap
-    var watcher = SrcWatcher().init();
-    defer watcher.deinit();
-
-    for (0..100e1) |i| {
-        lib.update();
-        if (watcher.poll_writes()) {
-            try w.print("Recompiling...\n", .{});
-            try bw.flush();
-            var cp = std.ChildProcess.init(&.{
-                "zig",
-                "build",
-                "-Dmode=LibOnly",
-            }, allocator);
-            _ = try cp.spawnAndWait();
-            try lib.reload();
+    for (0..1e3) |_| {
+        if (src_watcher.change_detected()) {
+            try game_loader.recompileAndReload(&allocator);
         }
-        try w.print("{}\n", .{i});
-        try bw.flush();
+        game_loader.tick();
+        game_loader.renderVideo();
+        game_loader.renderAudio();
         std.time.sleep(1e8);
     }
 }

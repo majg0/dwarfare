@@ -1,24 +1,27 @@
 const std = @import("std");
 
-const Mode = enum {
-    Full,
-    LibOnly,
-    ExeOnly,
-};
-
 pub fn build(b: *std.Build) void {
     const install_step = b.getInstallStep();
 
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const mode = b.option(
-        Mode,
-        "mode",
-        "Whether to build the game library, the host executable, or both.",
-    ) orelse .Full;
+    const game_only = b.option(
+        bool,
+        "game_only",
+        "Only build the game library, skipping the platform layer.",
+    ) orelse false;
 
-    if (mode == .Full or mode == .ExeOnly) {
+    const lib_compile = b.addSharedLibrary(.{
+        .name = "dwarfare",
+        .root_source_file = b.path("src/dwarfare.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    b.installArtifact(lib_compile);
+
+    if (!game_only) {
         const exe_compile = b.addExecutable(.{
             .name = "dwarfare",
             .root_source_file = b.path("src/platform.zig"),
@@ -33,16 +36,5 @@ pub fn build(b: *std.Build) void {
         run_exe.step.dependOn(install_step);
         const run_step = b.step("run", "Run the application");
         run_step.dependOn(&run_exe.step);
-    }
-
-    if (mode == .Full or mode == .LibOnly) {
-        const lib_compile = b.addSharedLibrary(.{
-            .name = "dwarfare",
-            .root_source_file = b.path("src/dwarfare.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-
-        b.installArtifact(lib_compile);
     }
 }
