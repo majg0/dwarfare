@@ -17,6 +17,39 @@ const assert = std.debug.assert;
 
 const int_invalid = 0xDEAD;
 
+pub const InputEvent = struct {
+    pub const Type = enum(u8) {
+        key_press,
+        // key_release,
+        // button_press,
+        // button_release,
+        // mouse_move,
+        // mouse_enter,
+        // mouse_leave,
+        // focus_in,
+        // focus_out,
+        // resize,
+        // visibility,
+    };
+
+    pub const KeyPress = struct {
+        /// platform-dependent
+        physical_key: u32,
+        virtual_key: u32,
+        text_size: u32,
+        /// gathered at input time, as a state change in e.g. shift key could alter it before processing
+        text_utf8: [64:0]u8,
+        // NOTE: we could get these at any time
+        // virtual_key_name_size: u32,
+        // virtual_key_name: [64:0]u8,
+    };
+
+    pub const KeyRelease = struct {
+        /// platform-dependent
+        physical_key: u32,
+    };
+};
+
 pub const XcbUi = struct {
     connection: *c.struct_xcb_connection_t = @ptrFromInt(int_invalid),
     window: c.xcb_window_t = int_invalid,
@@ -27,6 +60,12 @@ pub const XcbUi = struct {
     xkb_base_event: u8,
     xkb_base_error: u8,
     xkb_device_id: i32,
+
+    pub fn virtualKeyName(_: *const XcbUi, virtual_key: u32, slice: []u8) u32 {
+        const size = c.xkb_keysym_get_name(virtual_key, slice.ptr, slice.len);
+        assert(size >= 0);
+        return @intCast(size);
+    }
 
     pub fn eventsPoll(self: *XcbUi, input: *Input) void {
         for (0..100) |_| {
@@ -41,23 +80,21 @@ pub const XcbUi = struct {
                 },
                 c.XCB_KEY_PRESS => {
                     const e: *c.xcb_key_press_event_t = @ptrCast(generic_event);
-                    std.debug.print("0x{X} KeyPress {} state:0b{b} ({},{}) root:({},{})\n", .{ e.event, e.detail, e.state, e.event_x, e.event_y, e.root_x, e.root_y });
+                    // TODO: remove
                     input.keys.set(e.detail);
 
-                    {
-                        const keysym = c.xkb_state_key_get_one_sym(self.xkb_state, e.detail);
-                        var keysym_name = std.mem.zeroes([64:0]u8);
-                        const result = c.xkb_keysym_get_name(keysym, &keysym_name, keysym_name.len);
-                        std.debug.print("\nGOT KEYSYM {s}\n", .{keysym_name});
-                        assert(result != -1);
-                    }
+                    var out = InputEvent.KeyPress{
+                        .physical_key = e.detail,
+                        .virtual_key = c.xkb_state_key_get_one_sym(self.xkb_state, e.detail),
+                        .text_size = 0,
+                        .text_utf8 = std.mem.zeroes([64:0]u8),
+                    };
 
-                    {
-                        var keysym_text = std.mem.zeroes([64:0]u8);
-                        const result = c.xkb_state_key_get_utf8(self.xkb_state, e.detail, &keysym_text, keysym_text.len);
-                        std.debug.print("GOT TEXT \"{s}\"\n", .{keysym_text});
-                        assert(result != -1);
-                    }
+                    const size = c.xkb_state_key_get_utf8(self.xkb_state, e.detail, &out.text_utf8, out.text_utf8.len);
+                    assert(size >= 0);
+                    out.text_size = @intCast(size);
+
+                    std.debug.print("0x{X} KeyPress {} state:0b{b} ({},{}) root:({},{})\n", .{ e.event, e.detail, e.state, e.event_x, e.event_y, e.root_x, e.root_y });
                 },
                 c.XCB_KEY_RELEASE => {
                     const e: *c.xcb_key_release_event_t = @ptrCast(generic_event);

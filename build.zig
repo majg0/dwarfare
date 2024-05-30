@@ -1,5 +1,8 @@
 const std = @import("std");
 
+// TODO: create header files
+// https://github.com/ziglang/zig/issues/18188#issuecomment-2140880349
+
 pub fn build(b: *std.Build) void {
     const install_step = b.getInstallStep();
 
@@ -20,8 +23,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    _ = b.addInstallArtifact(lib_compile, .{});
-    install_step.dependOn(&lib_compile.step);
+    const lib_install = b.addInstallArtifact(lib_compile, .{});
+    install_step.dependOn(&lib_install.step);
 
     if (game_only) {
         return;
@@ -36,8 +39,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    _ = b.addInstallArtifact(exe_compile, .{});
-    install_step.dependOn(&exe_compile.step);
+    const exe_install = b.addInstallArtifact(exe_compile, .{});
+    install_step.dependOn(&exe_install.step);
 
     // Target: run
     {
@@ -46,6 +49,10 @@ pub fn build(b: *std.Build) void {
 
         const exe_step = b.step("run", "Run the main executable.");
         exe_step.dependOn(&exe_run.step);
+
+        if (b.args) |args| {
+            exe_run.addArgs(args);
+        }
     }
 
     // Target: test

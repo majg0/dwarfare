@@ -4,57 +4,50 @@ const consts = @import("./consts.zig");
 
 const assert = std.debug.assert;
 
-fn SrcWatcher() type {
-    const enabled = comptime builtin.os.tag == .linux and builtin.mode == .Debug;
-    if (!enabled) {
-        return struct {};
+const linux = std.os.linux;
+const IN = linux.IN;
+const SrcWatcher = struct {
+    const Self = @This();
+
+    event_buf: [4096]u8 align(@alignOf(linux.inotify_event)) = undefined,
+    fd: i32,
+    wd: i32,
+
+    fn init(self: *Self, pathname: [*:0]const u8) void {
+        self.fd = @intCast(linux.inotify_init1(IN.NONBLOCK | IN.CLOEXEC));
+        // TODO: walk directory tree and listen all folders
+        self.wd = @intCast(linux.inotify_add_watch(
+            self.fd,
+            pathname,
+            IN.MODIFY,
+        ));
     }
 
-    const linux = std.os.linux;
-    const IN = linux.IN;
-    return struct {
-        const Self = @This();
+    fn change_detected(self: *Self) bool {
+        const bytes_read = linux.read(
+            self.fd,
+            &self.event_buf,
+            self.event_buf.len,
+        );
 
-        event_buf: [4096]u8 align(@alignOf(linux.inotify_event)) = undefined,
-        fd: i32,
-        wd: i32,
-
-        fn init(self: *Self, pathname: [*:0]const u8) void {
-            self.fd = @intCast(linux.inotify_init1(IN.NONBLOCK | IN.CLOEXEC));
-            // TODO: walk directory tree and listen all folders
-            self.wd = @intCast(linux.inotify_add_watch(
-                self.fd,
-                pathname,
-                IN.MODIFY,
-            ));
-        }
-
-        fn change_detected(self: *Self) bool {
-            const bytes_read = linux.read(
-                self.fd,
-                &self.event_buf,
-                self.event_buf.len,
-            );
-
-            var ptr: [*]u8 = &self.event_buf;
-            const ptr_end = ptr + bytes_read;
-            while (@intFromPtr(ptr) < @intFromPtr(ptr_end)) {
-                const event = @as(*linux.inotify_event, @ptrCast(@alignCast(ptr)));
-                if ((event.mask & IN.MODIFY) != 0) {
-                    return true;
-                }
-                ptr = @alignCast(ptr + @sizeOf(linux.inotify_event) + event.len);
+        var ptr: [*]u8 = &self.event_buf;
+        const ptr_end = ptr + bytes_read;
+        while (@intFromPtr(ptr) < @intFromPtr(ptr_end)) {
+            const event = @as(*linux.inotify_event, @ptrCast(@alignCast(ptr)));
+            if ((event.mask & IN.MODIFY) != 0) {
+                return true;
             }
-
-            return false;
+            ptr = @alignCast(ptr + @sizeOf(linux.inotify_event) + event.len);
         }
 
-        fn deinit(self: *const Self) void {
-            _ = linux.inotify_rm_watch(self.fd, self.wd);
-            _ = linux.close(self.fd);
-        }
-    };
-}
+        return false;
+    }
+
+    fn deinit(self: *const Self) void {
+        _ = linux.inotify_rm_watch(self.fd, self.wd);
+        _ = linux.close(self.fd);
+    }
+};
 
 const GameLoader = struct {
     const GameStatePtr = *anyopaque;
@@ -79,7 +72,7 @@ const GameLoader = struct {
                 else => @compileError("where will the game library reside relative to the loader?"),
             };
             const lib_name = switch (builtin.os.tag) {
-                .linux => "libdwarfare.so",
+                .linux => "libgame.so",
                 else => @compileError("what is the game library called on this os?"),
             };
             const path = lib_dir ++ lib_name;
@@ -155,13 +148,15 @@ pub fn main() !void {
     defer game_loader.lib_unload();
 
     // src watcher
-    var src_watcher: SrcWatcher() = undefined;
+    var src_watcher: SrcWatcher = undefined;
     src_watcher.init("src");
     defer src_watcher.deinit();
 
     for (0..30) |_| {
-        if (src_watcher.change_detected()) {
-            try game_loader.recompileAndReload(&allocator);
+        if (builtin.mode == .Debug) {
+            if (src_watcher.change_detected()) {
+                try game_loader.recompileAndReload(&allocator);
+            }
         }
         // TODO: proper loop
         game_loader.tick();

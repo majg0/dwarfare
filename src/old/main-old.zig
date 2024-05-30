@@ -268,7 +268,7 @@ pub fn main() !void {
 
         try sys.timer_update.accumulate_duration();
         while (sys.timer_update.canTick()) {
-            std.debug.print("--- frame {} ---\n", .{sys.timer_update.frame_index});
+            // std.debug.print("--- frame {} ---\n", .{sys.timer_update.frame_index});
             defer input.frameConsume();
             defer sys.timer_update.tick();
 
@@ -279,7 +279,7 @@ pub fn main() !void {
             try recorder.frame_write(sys.timer_update.frame_index, sys.bindings, input);
 
             while (recorder.frame_advance(sys.timer_update.frame_index)) |event| {
-                std.debug.print("{any}\n", .{event});
+                // std.debug.print("{any}\n", .{event});
                 if (event != .action) {
                     continue;
                 }
