@@ -108,10 +108,10 @@ const GameLoader = struct {
         self.gameRenderAudio = self.lib.?.lookup(@TypeOf(self.gameRenderAudio), "gameRenderAudio") orelse unreachable;
     }
 
-    fn recompileAndReload(self: *GameLoader, allocator: *const std.mem.Allocator) (std.ChildProcess.SpawnError || std.DynLib.Error)!void {
+    fn recompileAndReload(self: *GameLoader, allocator: *const std.mem.Allocator) (std.process.Child.SpawnError || std.DynLib.Error)!void {
         if (builtin.mode == .Debug) {
             {
-                var game_compile = std.ChildProcess.init(
+                var game_compile = std.process.Child.init(
                     &.{ "zig", "build", "-Dgame_only=true" },
                     allocator.*,
                 );

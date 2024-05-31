@@ -3,7 +3,7 @@ vkvia.html
 *.spv
 
 # zig
-zig-cache
+.zig-cache
 zig-out
 
 # data (TODO: move to app folder e.g. under XDG)
