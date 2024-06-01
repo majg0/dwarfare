@@ -73,6 +73,7 @@ const GameLoader = struct {
             };
             const lib_name = switch (builtin.os.tag) {
                 .linux => "libgame.so",
+                .macos => "libgame.dylib",
                 else => @compileError("what is the game library called on this os?"),
             };
             const path = lib_dir ++ lib_name;

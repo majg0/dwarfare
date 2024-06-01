@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 // TODO: create header files
 // https://github.com/ziglang/zig/issues/18188#issuecomment-2140880349
@@ -17,6 +18,7 @@ pub fn build(b: *std.Build) void {
 
     // Game
     const lib_name = "game";
+    // TODO: handle macOS multiarch like in platform.
     const lib_compile = b.addSharedLibrary(.{
         .name = lib_name,
         .root_source_file = b.path("src/" ++ lib_name ++ ".zig"),
@@ -28,6 +30,72 @@ pub fn build(b: *std.Build) void {
 
     if (game_only) {
         return;
+    }
+
+    // Platform core ("dwarven")
+    switch (builtin.os.tag) {
+        .macos => {
+            const name = "dwarven";
+
+            // aarch64
+            var aarch64_target = target;
+            aarch64_target.query.cpu_arch = .aarch64;
+            const aarch64_compile = b.addStaticLibrary(.{
+                .name = name ++ "_aarch64",
+                .root_source_file = b.path("src/platform/core/lib.zig"),
+                .target = aarch64_target,
+                .optimize = optimize,
+                .link_libc = true,
+            });
+            aarch64_compile.bundle_compiler_rt = true;
+
+            // x86_64
+            var x86_64_target = target;
+            x86_64_target.query.cpu_arch = .x86_64;
+            const x86_64_compile = b.addStaticLibrary(.{
+                .name = name ++ "_x86_64",
+                .root_source_file = b.path("src/platform/core/lib.zig"),
+                .target = x86_64_target,
+                .optimize = optimize,
+                .link_libc = true,
+            });
+            x86_64_compile.bundle_compiler_rt = true;
+
+            // universal
+            const universal = b.addSystemCommand(&.{ "lipo", "-create", "-output" });
+            const universal_file = universal.addOutputFileArg("lib" ++ name ++ ".a");
+            universal.addArtifactArg(aarch64_compile);
+            universal.addArtifactArg(x86_64_compile);
+            universal.step.dependOn(&aarch64_compile.step);
+            universal.step.dependOn(&x86_64_compile.step);
+
+            // xcframework
+            // NOTE: we imperatively delete + recreate, to delete any stale files in case of renames.
+            const xcframework_file = b.path("src/platform/macos/" ++ name ++ ".xcframework");
+
+            const xcframework_delete = b.addSystemCommand(&.{ "rm", "-rf" });
+            xcframework_delete.has_side_effects = true;
+            xcframework_delete.addFileArg(xcframework_file);
+
+            const xcframework = b.addSystemCommand(&.{ "xcodebuild", "-create-xcframework", "-library" });
+            xcframework.has_side_effects = true;
+            xcframework.addFileArg(universal_file);
+            xcframework.addArg("-headers");
+            xcframework.addDirectoryArg(b.path("src/platform/core/include"));
+            xcframework.addArg("-output");
+            xcframework.addFileArg(xcframework_file);
+            xcframework.step.dependOn(&universal.step);
+            xcframework.step.dependOn(&xcframework_delete.step);
+
+            const xcframework_install = b.addInstallDirectory(.{
+                .source_dir = xcframework_file,
+                .install_dir = .lib,
+                .install_subdir = name ++ ".xcframework",
+            });
+            xcframework_install.step.dependOn(&xcframework.step);
+            install_step.dependOn(&xcframework_install.step);
+        },
+        else => {},
     }
 
     // Main executable

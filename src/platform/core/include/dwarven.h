@@ -1,0 +1,2 @@
+int init();
+int kill();

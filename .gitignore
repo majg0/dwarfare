@@ -9,3 +9,8 @@ zig-out
 # data (TODO: move to app folder e.g. under XDG)
 *.dat
 *.rec
+
+# XCode
+project.xcworkspace/
+xcuserdata/
+*.xcframework
