@@ -1,11 +1,9 @@
 const std = @import("std");
 
-export fn init() c_int {
-    std.debug.print("Platform init!", .{});
-    return 0;
+export fn init() void {
+    std.debug.print("Platform init!\n", .{});
 }
 
-export fn kill() c_int {
-    std.debug.print("Platform kill!", .{});
-    return 0;
+export fn kill() void {
+    std.debug.print("Platform kill!\n", .{});
 }

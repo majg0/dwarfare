@@ -33,80 +33,115 @@ pub fn build(b: *std.Build) void {
     }
 
     // Platform core ("dwarven")
-    switch (builtin.os.tag) {
-        .macos => {
-            const name = "dwarven";
+    var dwarven: *std.Build.Step.Compile = undefined;
+    {
+        const platform_name = "dwarven";
+        switch (builtin.os.tag) {
+            .windows => {
+                const compile = b.addStaticLibrary(.{
+                    .name = platform_name,
+                    .root_source_file = b.path("src/platform/core/lib.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .link_libc = true,
+                });
+                dwarven = compile;
 
-            // aarch64
-            var aarch64_target = target;
-            aarch64_target.query.cpu_arch = .aarch64;
-            const aarch64_compile = b.addStaticLibrary(.{
-                .name = name ++ "_aarch64",
-                .root_source_file = b.path("src/platform/core/lib.zig"),
-                .target = aarch64_target,
-                .optimize = optimize,
-                .link_libc = true,
-            });
-            aarch64_compile.bundle_compiler_rt = true;
+                const install = b.addInstallArtifact(compile, .{});
+                install_step.dependOn(&install.step);
+            },
+            .macos => {
+                // aarch64
+                var aarch64_target = target;
+                aarch64_target.query.cpu_arch = .aarch64;
+                const aarch64_compile = b.addStaticLibrary(.{
+                    .name = platform_name ++ "_aarch64",
+                    .root_source_file = b.path("src/platform/core/lib.zig"),
+                    .target = aarch64_target,
+                    .optimize = optimize,
+                    .link_libc = true,
+                });
+                aarch64_compile.bundle_compiler_rt = true;
 
-            // x86_64
-            var x86_64_target = target;
-            x86_64_target.query.cpu_arch = .x86_64;
-            const x86_64_compile = b.addStaticLibrary(.{
-                .name = name ++ "_x86_64",
-                .root_source_file = b.path("src/platform/core/lib.zig"),
-                .target = x86_64_target,
-                .optimize = optimize,
-                .link_libc = true,
-            });
-            x86_64_compile.bundle_compiler_rt = true;
+                // x86_64
+                var x86_64_target = target;
+                x86_64_target.query.cpu_arch = .x86_64;
+                const x86_64_compile = b.addStaticLibrary(.{
+                    .name = platform_name ++ "_x86_64",
+                    .root_source_file = b.path("src/platform/core/lib.zig"),
+                    .target = x86_64_target,
+                    .optimize = optimize,
+                    .link_libc = true,
+                });
+                x86_64_compile.bundle_compiler_rt = true;
 
-            // universal
-            const universal = b.addSystemCommand(&.{ "lipo", "-create", "-output" });
-            const universal_file = universal.addOutputFileArg("lib" ++ name ++ ".a");
-            universal.addArtifactArg(aarch64_compile);
-            universal.addArtifactArg(x86_64_compile);
-            universal.step.dependOn(&aarch64_compile.step);
-            universal.step.dependOn(&x86_64_compile.step);
+                // universal
+                const universal = b.addSystemCommand(&.{ "lipo", "-create", "-output" });
+                const universal_file = universal.addOutputFileArg("lib" ++ platform_name ++ ".a");
+                universal.addArtifactArg(aarch64_compile);
+                universal.addArtifactArg(x86_64_compile);
+                universal.step.dependOn(&aarch64_compile.step);
+                universal.step.dependOn(&x86_64_compile.step);
 
-            // xcframework
-            // NOTE: we imperatively delete + recreate, to delete any stale files in case of renames.
-            const xcframework_file = b.path("src/platform/macos/" ++ name ++ ".xcframework");
+                // xcframework
+                // NOTE: we imperatively delete + recreate, to delete any stale files in case of renames.
+                const xcframework_file = b.path("src/platform/macos/" ++ platform_name ++ ".xcframework");
 
-            const xcframework_delete = b.addSystemCommand(&.{ "rm", "-rf" });
-            xcframework_delete.has_side_effects = true;
-            xcframework_delete.addFileArg(xcframework_file);
+                const xcframework_delete = b.addSystemCommand(&.{ "rm", "-rf" });
+                xcframework_delete.has_side_effects = true;
+                xcframework_delete.addFileArg(xcframework_file);
 
-            const xcframework = b.addSystemCommand(&.{ "xcodebuild", "-create-xcframework", "-library" });
-            xcframework.has_side_effects = true;
-            xcframework.addFileArg(universal_file);
-            xcframework.addArg("-headers");
-            xcframework.addDirectoryArg(b.path("src/platform/core/include"));
-            xcframework.addArg("-output");
-            xcframework.addFileArg(xcframework_file);
-            xcframework.step.dependOn(&universal.step);
-            xcframework.step.dependOn(&xcframework_delete.step);
+                const xcframework = b.addSystemCommand(&.{ "xcodebuild", "-create-xcframework", "-library" });
+                xcframework.has_side_effects = true;
+                xcframework.addFileArg(universal_file);
+                xcframework.addArg("-headers");
+                xcframework.addDirectoryArg(b.path("src/platform/core/include"));
+                xcframework.addArg("-output");
+                xcframework.addFileArg(xcframework_file);
+                xcframework.step.dependOn(&universal.step);
+                xcframework.step.dependOn(&xcframework_delete.step);
 
-            const xcframework_install = b.addInstallDirectory(.{
-                .source_dir = xcframework_file,
-                .install_dir = .lib,
-                .install_subdir = name ++ ".xcframework",
-            });
-            xcframework_install.step.dependOn(&xcframework.step);
-            install_step.dependOn(&xcframework_install.step);
-        },
-        else => {},
+                const xcframework_install = b.addInstallDirectory(.{
+                    .source_dir = xcframework_file,
+                    .install_dir = .lib,
+                    .install_subdir = platform_name ++ ".xcframework",
+                });
+                xcframework_install.step.dependOn(&xcframework.step);
+                install_step.dependOn(&xcframework_install.step);
+            },
+            else => unreachable,
+        }
+    }
+
+    // Platform-dependent executable ("dwarven")
+    const exe_name = "dwarven";
+    var exe_compile: *std.Build.Step.Compile = undefined;
+    {
+        switch (builtin.os.tag) {
+            .windows => {
+                exe_compile = b.addExecutable(.{
+                    .name = exe_name,
+                    .root_source_file = b.path("src/platform/windows/main.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    // .link_libc = true,
+                });
+                exe_compile.addIncludePath(b.path("src/platform/core/include/"));
+                exe_compile.linkLibrary(dwarven);
+            },
+            else => @compileError("can we build the whole shebang for this platform using only zig's build system?"),
+        }
     }
 
     // Main executable
-    const exe_name = "dwarfare";
-    const exe_compile = b.addExecutable(.{
-        .name = exe_name,
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
+    // const exe_name = "dwarfare";
+    // const exe_compile = b.addExecutable(.{
+    //     .name = exe_name,
+    //     .root_source_file = b.path("src/main.zig"),
+    //     .target = target,
+    //     .optimize = optimize,
+    //     .link_libc = true,
+    // });
     const exe_install = b.addInstallArtifact(exe_compile, .{});
     install_step.dependOn(&exe_install.step);
 

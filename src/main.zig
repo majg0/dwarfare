@@ -68,13 +68,14 @@ const GameLoader = struct {
     fn init(self: *GameLoader, allocator: *const std.mem.Allocator) std.DynLib.Error!void {
         {
             const lib_dir = switch (builtin.mode) {
-                .Debug => "zig-out/lib/",
-                else => @compileError("where will the game library reside relative to the loader?"),
+                .Debug => if (builtin.os.tag == .windows) "zig-out/bin/" else "zig-out/lib/",
+                else => @compileError("Where will the game library reside relative to the loader?"),
             };
             const lib_name = switch (builtin.os.tag) {
                 .linux => "libgame.so",
                 .macos => "libgame.dylib",
-                else => @compileError("what is the game library called on this os?"),
+                .windows => "game.dll",
+                else => @compileError("What is the game library called on this os?"),
             };
             const path = lib_dir ++ lib_name;
 
@@ -111,6 +112,7 @@ const GameLoader = struct {
 
     fn recompileAndReload(self: *GameLoader, allocator: *const std.mem.Allocator) (std.process.Child.SpawnError || std.DynLib.Error)!void {
         if (builtin.mode == .Debug) {
+            self.lib_unload();
             {
                 var game_compile = std.process.Child.init(
                     &.{ "zig", "build", "-Dgame_only=true" },
@@ -118,7 +120,6 @@ const GameLoader = struct {
                 );
                 _ = try game_compile.spawnAndWait();
             }
-            self.lib_unload();
             try self.lib_load();
             self.gameReload(self.game_state);
         }
@@ -150,14 +151,19 @@ pub fn main() !void {
 
     // src watcher
     var src_watcher: SrcWatcher = undefined;
-    src_watcher.init("src");
-    defer src_watcher.deinit();
+    if (builtin.os.tag == .linux) {
+        src_watcher.init("src");
+        defer src_watcher.deinit();
+    }
 
-    for (0..30) |_| {
-        if (builtin.mode == .Debug) {
+    for (0..300) |i| {
+        if (builtin.mode == .Debug and builtin.os.tag == .linux) {
             if (src_watcher.change_detected()) {
                 try game_loader.recompileAndReload(&allocator);
             }
+        }
+        if ((i % 50) == 0) {
+            try game_loader.recompileAndReload(&allocator);
         }
         // TODO: proper loop
         game_loader.tick();

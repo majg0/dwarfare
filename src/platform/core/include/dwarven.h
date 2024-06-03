@@ -1,2 +1,2 @@
-int init();
-int kill();
+void init();
+void kill();
