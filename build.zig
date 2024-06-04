@@ -124,10 +124,16 @@ pub fn build(b: *std.Build) void {
                     .root_source_file = b.path("src/platform/windows/main.zig"),
                     .target = target,
                     .optimize = optimize,
-                    // .link_libc = true,
                 });
                 exe_compile.addIncludePath(b.path("src/platform/core/include/"));
+                exe_compile.addIncludePath(b.path("src/platform/windows/"));
                 exe_compile.linkLibrary(dwarven);
+                exe_compile.addWin32ResourceFile(.{ .file = b.path("src/platform/windows/resource.rc") });
+                exe_compile.win32_manifest = b.path("src/platform/windows/application.manifest");
+                if (optimize != .Debug) {
+                    // NOTE: this makes it not open a console at startup when executed from outside a terminal
+                    exe_compile.subsystem = .Windows;
+                }
             },
             else => @compileError("can we build the whole shebang for this platform using only zig's build system?"),
         }

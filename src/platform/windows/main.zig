@@ -1,32 +1,35 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const assert = std.debug.assert;
-
+const resource = @cImport(@cInclude("./resource.h"));
 const win = @cImport({
     // HACK: workaround zig failing to resolve mingw's name macro (just the A vs W suffix based on UNICODE)
     @cDefine("MAKEINTRESOURCE", "MAKEINTRESOURCEA");
-    // TODO: use 16-bit unicode
-    // @cDefine("UNICODE", "1");
     @cDefine("WIN32_LEAN_AND_MEAN", "1");
     @cInclude("Windows.h");
 });
+const dwarven = @cImport(@cInclude("dwarven.h"));
 
-const dwarven = @cImport({
-    @cInclude("dwarven.h");
-});
+const assert = std.debug.assert;
 
-// LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
+// TODO:
+// - error handling
+// - event handling
+// - outsource program flow to core
+
+export fn platformExit(exit_code: i32) void {
+    win.PostQuitMessage(exit_code);
+}
 
 fn wndProc(h_wnd: win.HWND, message: win.UINT, w_param: win.WPARAM, l_param: win.LPARAM) callconv(std.os.windows.WINAPI) win.LRESULT {
     switch (message) {
         // NOTE: when Alt is held while pressing another key, we end up in the sys key space
-        // win.WM_SYSKEYDOWN => {},
+        win.WM_SYSKEYDOWN => {},
 
         win.WM_KEYDOWN => {
             switch (w_param) {
                 win.VK_ESCAPE => {
-                    std.debug.print("can't escape, teehee!\n", .{});
+                    dwarven.onWindowClose(h_wnd);
                 },
                 else => {},
             }
@@ -35,7 +38,7 @@ fn wndProc(h_wnd: win.HWND, message: win.UINT, w_param: win.WPARAM, l_param: win
         //     // NOTE: Windows plays a system notification sound when pressing Alt+Enter unless this message is handled. :)
         // },
         win.WM_DESTROY => {
-            win.PostQuitMessage(0);
+            dwarven.onWindowClose(h_wnd);
         },
 
         else => {
@@ -55,17 +58,19 @@ pub export fn main(h_inst: win.HINSTANCE, _: win.HINSTANCE, _: win.PWSTR, _: c_i
 
     const window_title: [*c]const u8 = "Dwarven\x00";
 
+    const icon = win.MAKEINTRESOURCEA(resource.IDI_ICON);
+    const h_icon = win.LoadIconA(win.GetModuleHandleA(0), icon);
+
     const screen_width = win.GetSystemMetrics(win.SM_CXSCREEN);
     const screen_height = win.GetSystemMetrics(win.SM_CYSCREEN);
     const window_class = win.WNDCLASSEXA{
         .cbClsExtra = 0,
         .cbSize = @sizeOf(win.WNDCLASSEXA),
         .cbWndExtra = 0,
-        .hbrBackground = (win.COLOR_WINDOW + 1),
-        // TODO: can we get load cursor working?
+        .hbrBackground = win.COLOR_WINDOWFRAME,
         .hCursor = win.LoadCursorA(0, win.IDC_ARROW),
-        .hIcon = win.LoadIconA(h_inst, 0),
-        .hIconSm = win.LoadIconA(h_inst, 0),
+        .hIcon = h_icon,
+        .hIconSm = h_icon,
         .hInstance = h_inst,
         .lpfnWndProc = &wndProc,
         .lpszClassName = window_title,
