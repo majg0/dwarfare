@@ -37,7 +37,7 @@ pub fn build(b: *std.Build) void {
     {
         const platform_name = "dwarven";
         switch (builtin.os.tag) {
-            .windows => {
+            .windows, .linux => {
                 const compile = b.addStaticLibrary(.{
                     .name = platform_name,
                     .root_source_file = b.path("src/platform/core/lib.zig"),
@@ -135,19 +135,22 @@ pub fn build(b: *std.Build) void {
                     exe_compile.subsystem = .Windows;
                 }
             },
+            .linux => {
+                exe_compile = b.addExecutable(.{
+                    .name = exe_name,
+                    .root_source_file = b.path("src/platform/linux/main.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .link_libc = true,
+                });
+                exe_compile.addIncludePath(b.path("src/platform/core/include/"));
+                exe_compile.linkLibrary(dwarven);
+            },
             else => @compileError("can we build the whole shebang for this platform using only zig's build system?"),
         }
     }
 
     // Main executable
-    // const exe_name = "dwarfare";
-    // const exe_compile = b.addExecutable(.{
-    //     .name = exe_name,
-    //     .root_source_file = b.path("src/main.zig"),
-    //     .target = target,
-    //     .optimize = optimize,
-    //     .link_libc = true,
-    // });
     const exe_install = b.addInstallArtifact(exe_compile, .{});
     install_step.dependOn(&exe_install.step);
 

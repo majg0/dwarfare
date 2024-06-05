@@ -7,6 +7,7 @@ const GameState = struct {
     fn init(self: *GameState) void {
         self.reload_count = 0;
         self.tick_current = 0;
+        std.debug.print("hello from game\n", .{});
     }
 
     fn reload(self: *GameState) void {

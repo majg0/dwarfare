@@ -1,3 +1,3 @@
-void init();
-void onWindowClose(void* window_handle);
+void init(int argc, char **argv);
+void onWindowClose(void *window_handle);
 void kill();
