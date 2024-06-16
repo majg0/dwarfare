@@ -10,6 +10,8 @@ const win = @cImport({
 });
 const dwarven = @cImport(@cInclude("dwarven.h"));
 
+const unicode = @import("./unicode.zig");
+
 const assert = std.debug.assert;
 
 // TODO:
@@ -42,7 +44,7 @@ fn wndProc(h_wnd: win.HWND, message: win.UINT, w_param: win.WPARAM, l_param: win
         },
 
         else => {
-            return win.DefWindowProcA(h_wnd, message, w_param, l_param);
+            return win.DefWindowProcW(h_wnd, message, w_param, l_param);
         },
     }
 
@@ -56,34 +58,35 @@ pub export fn main(h_inst: win.HINSTANCE, _: win.HINSTANCE, _: win.PWSTR, _: c_i
     // NOTE: Allows the client area of the window to achieve 100% scaling while allowing non-client window content in a DPI sensitive fashion.
     _ = win.SetThreadDpiAwarenessContext(win.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
-    const window_title: [*c]const u8 = "Dwarven\x00";
+    const title = "Dwarfare";
+    var window_title = std.mem.zeroes([64]c_ushort);
+    _ = unicode.utf8_to_ut16(title, &window_title);
 
-    const icon = win.MAKEINTRESOURCEA(resource.IDI_ICON);
-    const h_icon = win.LoadIconA(win.GetModuleHandleA(0), icon);
+    const h_icon = win.LoadIconW(win.GetModuleHandleW(0), resource.IDI_ICON);
 
     const screen_width = win.GetSystemMetrics(win.SM_CXSCREEN);
     const screen_height = win.GetSystemMetrics(win.SM_CYSCREEN);
-    const window_class = win.WNDCLASSEXA{
+    const window_class = win.WNDCLASSEXW{
         .cbClsExtra = 0,
-        .cbSize = @sizeOf(win.WNDCLASSEXA),
+        .cbSize = @sizeOf(win.WNDCLASSEXW),
         .cbWndExtra = 0,
         .hbrBackground = win.COLOR_WINDOWFRAME,
-        .hCursor = win.LoadCursorA(0, win.IDC_ARROW),
+        .hCursor = win.LoadCursorW(0, @ptrCast(@alignCast(win.IDC_ARROW))),
         .hIcon = h_icon,
         .hIconSm = h_icon,
         .hInstance = h_inst,
         .lpfnWndProc = &wndProc,
-        .lpszClassName = window_title,
+        .lpszClassName = &window_title,
         .lpszMenuName = 0,
         .style = win.CS_HREDRAW | win.CS_VREDRAW,
     };
-    const atom = win.RegisterClassExA(&window_class);
+    const atom = win.RegisterClassExW(&window_class);
     assert(atom != 0);
 
-    const h_wnd = win.CreateWindowExA(
+    const h_wnd = win.CreateWindowExW(
         0,
-        window_title,
-        window_title,
+        &window_title,
+        &window_title,
         win.WS_OVERLAPPEDWINDOW,
         screen_width >> 2,
         screen_height >> 2,
@@ -103,9 +106,9 @@ pub export fn main(h_inst: win.HINSTANCE, _: win.HINSTANCE, _: win.PWSTR, _: c_i
 
     var msg = win.MSG{};
     while (msg.message != win.WM_QUIT) {
-        if (win.PeekMessageA(&msg, 0, 0, 0, win.PM_REMOVE) != 0) {
+        if (win.PeekMessageW(&msg, 0, 0, 0, win.PM_REMOVE) != 0) {
             _ = win.TranslateMessage(&msg);
-            _ = win.DispatchMessageA(&msg);
+            _ = win.DispatchMessageW(&msg);
         }
     }
 
