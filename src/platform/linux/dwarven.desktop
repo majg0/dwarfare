@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Name=Dwarfare
+Comment=A game about dwarves and warfare
+Exec=/home/martin/w/dwarfare/zig-out/bin/dwarven
+Icon=dwarven
+Terminal=false
+Type=Application
+Categories=Game;
+StartupWMClass=dwarven

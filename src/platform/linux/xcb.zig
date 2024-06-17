@@ -6,7 +6,8 @@ const c = @cImport({
     @cInclude("xkbcommon/xkbcommon.h");
     @cInclude("xkbcommon/xkbcommon-x11.h");
 });
-const Input = @import("input.zig").Input;
+// const Input = @import("input.zig").Input;
+const platform = @import("platform");
 
 // TODO: check replies across function calls in this file, no _ =
 
@@ -50,6 +51,122 @@ pub const InputEvent = struct {
     };
 };
 
+fn key_code_translate(keycode: u8) platform.KeyCode {
+    return switch (keycode) {
+        9 => .escape,
+        10 => .num1,
+        11 => .num2,
+        12 => .num3,
+        13 => .num4,
+        14 => .num5,
+        15 => .num6,
+        16 => .num7,
+        17 => .num8,
+        18 => .num9,
+        19 => .num0,
+        20 => .minus,
+        21 => .equal,
+        22 => .backspace,
+        23 => .tab,
+        24 => .q,
+        25 => .w,
+        26 => .e,
+        27 => .r,
+        28 => .t,
+        29 => .y,
+        30 => .u,
+        31 => .i,
+        32 => .o,
+        33 => .p,
+        34 => .bracket_left,
+        35 => .bracket_right,
+        36 => .enter,
+        37 => .control_left,
+        38 => .a,
+        39 => .s,
+        40 => .d,
+        41 => .f,
+        42 => .g,
+        43 => .h,
+        44 => .j,
+        45 => .k,
+        46 => .l,
+        47 => .semicolon,
+        48 => .apostrophe,
+        49 => .grave,
+        50 => .shift_left,
+        51 => .backslash,
+        52 => .z,
+        53 => .x,
+        54 => .c,
+        55 => .v,
+        56 => .b,
+        57 => .n,
+        58 => .m,
+        59 => .comma,
+        60 => .period,
+        61 => .slash,
+        62 => .shift_right,
+        63 => .numpad_mul,
+        64 => .alt_left,
+        65 => .space,
+        66 => .caps_lock,
+        67 => .f1,
+        68 => .f2,
+        69 => .f3,
+        70 => .f4,
+        71 => .f5,
+        72 => .f6,
+        73 => .f7,
+        74 => .f8,
+        75 => .f9,
+        76 => .f10,
+        77 => .num_lock,
+        78 => .scroll_lock,
+        79 => .numpad_7,
+        80 => .numpad_8,
+        81 => .numpad_9,
+        82 => .numpad_sub,
+        83 => .numpad_4,
+        84 => .numpad_5,
+        85 => .numpad_6,
+        86 => .numpad_add,
+        87 => .numpad_1,
+        88 => .numpad_2,
+        89 => .numpad_3,
+        90 => .numpad_0,
+        91 => .numpad_delete,
+        // ?
+        94 => .less,
+        95 => .f11,
+        96 => .f12,
+        // ?
+        104 => .numpad_enter,
+        105 => .control_right,
+        106 => .numpad_div,
+        107 => .print_screen,
+        108 => .alt_right,
+        // ?
+        110 => .home,
+        111 => .up,
+        112 => .page_up,
+        113 => .left,
+        114 => .right,
+        115 => .end,
+        116 => .down,
+        117 => .page_down,
+        118 => .insert,
+        119 => .delete,
+        // ?
+        127 => .pause_break,
+        // ?
+        133 => .gui_left,
+        // ?
+        135 => .menu,
+        else => .unknown,
+    };
+}
+
 pub const XcbUi = struct {
     connection: *c.struct_xcb_connection_t = @ptrFromInt(int_invalid),
     window: c.xcb_window_t = int_invalid,
@@ -67,9 +184,9 @@ pub const XcbUi = struct {
         return @intCast(size);
     }
 
-    pub fn eventsPoll(self: *XcbUi, input: *Input) void {
+    pub fn eventsPoll(self: *XcbUi) ?platform.Event {
         for (0..100) |_| {
-            const generic_event: *c.xcb_generic_event_t = c.xcb_poll_for_event(self.connection) orelse return;
+            const generic_event: *c.xcb_generic_event_t = c.xcb_poll_for_event(self.connection) orelse return null;
             defer c.free(generic_event);
 
             const response_type = generic_event.response_type & 0x7F;
@@ -80,8 +197,6 @@ pub const XcbUi = struct {
                 },
                 c.XCB_KEY_PRESS => {
                     const e: *c.xcb_key_press_event_t = @ptrCast(generic_event);
-                    // TODO: remove
-                    input.keys.set(e.detail);
 
                     var out = InputEvent.KeyPress{
                         .physical_key = e.detail,
@@ -95,21 +210,35 @@ pub const XcbUi = struct {
                     out.text_size = @intCast(size);
 
                     std.debug.print("0x{X} KeyPress {} state:0b{b} ({},{}) root:({},{})\n", .{ e.event, e.detail, e.state, e.event_x, e.event_y, e.root_x, e.root_y });
+
+                    return platform.Event{
+                        .tag = .key_down,
+                        .data = .{
+                            .key_down = .{
+                                .key_code = key_code_translate(e.detail),
+                            },
+                        },
+                    };
                 },
                 c.XCB_KEY_RELEASE => {
                     const e: *c.xcb_key_release_event_t = @ptrCast(generic_event);
                     std.debug.print("0x{X} KeyRelease {} state:0b{b} ({},{}) root:({},{})\n", .{ e.event, e.detail, e.state, e.event_x, e.event_y, e.root_x, e.root_y });
-                    input.keys.unset(e.detail);
+                    return platform.Event{
+                        .tag = .key_up,
+                        .data = .{
+                            .key_up = .{
+                                .key_code = key_code_translate(e.detail),
+                            },
+                        },
+                    };
                 },
                 c.XCB_BUTTON_PRESS => {
                     const e: *c.xcb_button_press_event_t = @ptrCast(generic_event);
                     std.debug.print("0x{X} ButtonPress {} state:0b{b} ({},{}) root:({},{})\n", .{ e.event, e.detail, e.state, e.event_x, e.event_y, e.root_x, e.root_y });
-                    input.keys.set(e.detail);
                 },
                 c.XCB_BUTTON_RELEASE => {
                     const e: *c.xcb_button_release_event_t = @ptrCast(generic_event);
                     std.debug.print("0x{X} ButtonRelease {} state:0b{b} ({},{}) root:({},{})\n", .{ e.event, e.detail, e.state, e.event_x, e.event_y, e.root_x, e.root_y });
-                    input.keys.unset(e.detail);
                 },
                 c.XCB_MOTION_NOTIFY => {
                     const e: *c.xcb_motion_notify_event_t = @ptrCast(generic_event);
@@ -134,7 +263,6 @@ pub const XcbUi = struct {
                 c.XCB_EXPOSE => {
                     const e: *c.xcb_expose_event_t = @ptrCast(generic_event);
                     std.debug.print("0x{X} Expose ({},{},{},{})\n", .{ e.window, e.x, e.y, e.width, e.height });
-                    input.wm.flags |= @intFromEnum(Input.Wm.Event.resize);
                 },
                 c.XCB_VISIBILITY_NOTIFY => {
                     const e: *c.xcb_visibility_notify_event_t = @ptrCast(generic_event);
@@ -242,9 +370,7 @@ pub const XcbUi = struct {
                     switch (e.format) {
                         8 => {},
                         16 => {},
-                        32 => if (e.data.data32[0] == self.wm_delete_window_atom) {
-                            input.wm.flags |= @intFromEnum(Input.Wm.Event.delete);
-                        },
+                        32 => if (e.data.data32[0] == self.wm_delete_window_atom) {},
                         else => {},
                     }
                 },
@@ -277,6 +403,7 @@ pub const XcbUi = struct {
                 },
             }
         }
+        return null;
     }
 
     fn xkb_recreate(self: *XcbUi) error{ XkbKeymapNewError, XkbStateNewError }!void {
@@ -368,7 +495,7 @@ pub const XcbUi = struct {
             &value_list,
         );
 
-        const title = "dwarfare";
+        const title = "dwarven";
         _ = c.xcb_change_property(
             self.connection,
             c.XCB_PROP_MODE_REPLACE,
@@ -381,7 +508,7 @@ pub const XcbUi = struct {
         );
 
         // TODO: how to use?
-        const title_icon = "dwarfare (icon)";
+        const title_icon = "dwarven\x00";
         _ = c.xcb_change_property(
             self.connection,
             c.XCB_PROP_MODE_REPLACE,

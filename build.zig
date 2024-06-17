@@ -143,8 +143,18 @@ pub fn build(b: *std.Build) void {
                     .optimize = optimize,
                     .link_libc = true,
                 });
+                const module = b.addModule("platform", .{
+                    .root_source_file = b.path("src/platform/core/common.zig"),
+                });
+                exe_compile.root_module.addImport("platform", module);
                 exe_compile.addIncludePath(b.path("src/platform/core/include/"));
                 exe_compile.linkLibrary(dwarven);
+                exe_compile.linkSystemLibrary("xcb");
+                exe_compile.linkSystemLibrary("xcb-xkb");
+                exe_compile.linkSystemLibrary("xkbcommon");
+                exe_compile.linkSystemLibrary("xkbcommon-x11");
+                exe_compile.linkSystemLibrary("vulkan");
+                exe_compile.linkSystemLibrary("asound");
             },
             else => @compileError("can we build the whole shebang for this platform using only zig's build system?"),
         }

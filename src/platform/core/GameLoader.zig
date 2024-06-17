@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const common = @import("./common.zig");
 const assert = std.debug.assert;
 
 const GameLoader = @This();
@@ -14,9 +15,11 @@ lib: ?std.DynLib,
 game_state: GameStatePtr,
 gameInit: *const fn (*const std.mem.Allocator) GameStatePtr,
 gameReload: *const fn (GameStatePtr) void,
-gameTick: *const fn (GameStatePtr) void,
+gameReceiveEvent: *const fn (GameStatePtr, *const common.Event) void,
+gameUpdate: *const fn (GameStatePtr) common.UpdateResult,
 gameRenderVideo: *const fn (GameStatePtr) void,
 gameRenderAudio: *const fn (GameStatePtr) void,
+gameDeinit: *const fn (GameStatePtr) void,
 
 pub fn init(self: *GameLoader, name: []const u8, allocator: *const std.mem.Allocator) std.DynLib.Error!void {
     {
@@ -59,13 +62,16 @@ pub fn init(self: *GameLoader, name: []const u8, allocator: *const std.mem.Alloc
     self.game_state = self.gameInit(allocator);
 }
 
-fn tick(self: *GameLoader) void {
-    self.gameTick(self.game_state);
+pub fn receiveEvent(self: *GameLoader, event: *const common.Event) void {
+    return self.gameReceiveEvent(self.game_state, event);
 }
-fn renderVideo(self: *GameLoader) void {
+pub fn update(self: *GameLoader) common.UpdateResult {
+    return self.gameUpdate(self.game_state);
+}
+pub fn renderVideo(self: *GameLoader) void {
     self.gameRenderVideo(self.game_state);
 }
-fn renderAudio(self: *GameLoader) void {
+pub fn renderAudio(self: *GameLoader) void {
     self.gameRenderAudio(self.game_state);
 }
 
@@ -73,9 +79,11 @@ fn lib_load(self: *GameLoader) std.DynLib.Error!void {
     self.lib = try std.DynLib.open(self.path);
     self.gameInit = self.lib.?.lookup(@TypeOf(self.gameInit), "gameInit") orelse unreachable;
     self.gameReload = self.lib.?.lookup(@TypeOf(self.gameReload), "gameReload") orelse unreachable;
-    self.gameTick = self.lib.?.lookup(@TypeOf(self.gameTick), "gameTick") orelse unreachable;
+    self.gameReceiveEvent = self.lib.?.lookup(@TypeOf(self.gameReceiveEvent), "gameReceiveEvent") orelse unreachable;
+    self.gameUpdate = self.lib.?.lookup(@TypeOf(self.gameUpdate), "gameUpdate") orelse unreachable;
     self.gameRenderVideo = self.lib.?.lookup(@TypeOf(self.gameRenderVideo), "gameRenderVideo") orelse unreachable;
     self.gameRenderAudio = self.lib.?.lookup(@TypeOf(self.gameRenderAudio), "gameRenderAudio") orelse unreachable;
+    self.gameDeinit = self.lib.?.lookup(@TypeOf(self.gameDeinit), "gameDeinit") orelse unreachable;
 }
 
 fn recompileAndReload(self: *GameLoader, allocator: *const std.mem.Allocator) (std.process.Child.SpawnError || std.DynLib.Error)!void {
@@ -95,6 +103,7 @@ fn recompileAndReload(self: *GameLoader, allocator: *const std.mem.Allocator) (s
 
 pub fn lib_unload(self: *GameLoader) void {
     if (self.lib) |*dyn| {
+        self.gameDeinit(self.game_state);
         dyn.close();
     }
 }
